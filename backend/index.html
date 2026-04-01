@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>EEG Simulator Test - Backend</title>
+  <style>
+    body { 
+      font-family: 'Courier New', monospace; 
+      background: #000; 
+      color: #0f0; 
+      padding: 20px; 
+      margin: 0; 
+      line-height: 1.4;
+    }
+    #log { 
+      height: 400px; 
+      overflow-y: auto; 
+      background: #111; 
+      border: 1px solid #0f0; 
+      padding: 15px; 
+      white-space: pre-wrap; 
+      font-size: 14px;
+    }
+    button { 
+      background: #0f0; 
+      color: #000; 
+      border: none; 
+      padding: 10px 20px; 
+      margin: 5px; 
+      cursor: pointer; 
+      font-weight: bold;
+    }
+    button:hover { background: #0c0; }
+    button:disabled { background: #444; cursor: not-allowed; }
+    .metric { font-size: 18px; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>🧠 EEG Simulator Test (Backend)</h1>
+  <div>
+    <button onclick="startSim()">▶️ Start</button>
+    <button onclick="stopSim()">⏹️ Stop</button>
+    <button onclick="tranceMode()">🌙 Trance Mode</button>
+    <button onclick="setTheta(60)">Theta 60μV</button>
+    <button onclick="clearLog()">🗑️ Clear Log</button>
+  </div>
+  
+  <div class="metric">
+    Estado: <span id="status">Stopped</span> | 
+    Theta: <span id="theta">30μV</span> | 
+    Samples: <span id="samples">0</span>
+  </div>
+  
+  <div id="log">Listo para iniciar el simulador...\n\n</div>
+
+  <script type="module">
+    let sim = null;
+    let sampleCount = 0;
+
+    function log(msg) {
+      const logDiv = document.getElementById('log');
+      logDiv.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+      logDiv.scrollTop = logDiv.scrollHeight;
+    }
+
+    async function importSimulator() {
+      // Importa dinámicamente el módulo compilado del simulador
+      const module = await import('./dist/eeg-simulator.js');
+      return module.EEGSimulator;
+    }
+
+    window.startSim = async () => {
+      try {
+        const EEGSimulator = await importSimulator();
+        sim = new EEGSimulator({ sampleRate: 250, channels: 8 });
+        
+        sim.on('sample', (sample) => {
+          sampleCount++;
+          const ch0 = sample.channelData[0].toFixed(1);
+          log(`📊 Sample #${sampleCount}: ch0=${ch0}μV`);
+          document.getElementById('samples').textContent = sampleCount;
+        });
+        
+        sim.on('started', () => {
+          log('✅ Simulador iniciado - 250Hz, 8 canales');
+          document.getElementById('status').textContent = 'Running';
+        });
+        
+        sim.on('trance', (data) => {
+          log(`🌙 Modo trance activado: theta → ${data.targetTheta}μV`);
+        });
+        
+        sim.start();
+        log('🚀 EEGSimulator ejecutándose...');
+      } catch (error) {
+        log(`❌ Error: ${error.message}`);
+      }
+    };
+
+    window.stopSim = () => {
+      if (sim) {
+        sim.stop();
+        document.getElementById('status').textContent = 'Stopped';
+        log('⏹️ Simulador detenido');
+      }
+    };
+
+    window.tranceMode = async () => {
+      if (sim) {
+        sim.enableTranceMode();
+        log('🌙 Activando modo trance (30→80μV en 30s)');
+      } else log('❌ Inicia primero con Start');
+    };
+
+    window.setTheta = (value) => {
+      if (sim) {
+        sim.setTheta(value);
+        document.getElementById('theta').textContent = `${value}μV`;
+        log(`🔧 Theta seteado a ${value}μV`);
+      } else log('❌ Inicia primero con Start');
+    };
+
+    window.clearLog = () => {
+      document.getElementById('log').textContent = '';
+      sampleCount = 0;
+      document.getElementById('samples').textContent = '0';
+    };
+  </script>
+</body>
+</html>

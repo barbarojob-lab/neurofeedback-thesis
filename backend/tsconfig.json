@@ -1,0 +1,46 @@
+{
+  // Visit https://aka.ms/tsconfig to read more about this file
+  "compilerOptions": {
+    // ── File Layout ────────────────────────────────────────────────────────────
+    "rootDir": "./src",                       // Fuentes TypeScript
+    "outDir": "./dist",                       // Salida compilada JS (no versionar)
+
+    // ── Environment Settings ───────────────────────────────────────────────────
+    "module": "commonjs",                     // Compatible con Node.js y libs DSP/EEG
+    "target": "ES2022",                       // structuredClone, Array.at(), await top-level
+    "lib": ["ES2022"],
+    "types": ["node"],                        // Tipos globales de Node (process, Buffer…)
+    // npm install -D @types/node
+
+    // ── Module Resolution ──────────────────────────────────────────────────────
+    "moduleResolution": "node",               // Resolución clásica Node + CommonJS
+    "resolveJsonModule": true,                // Importar .json (configs de sesión, etc.)
+    "esModuleInterop": true,                  // Interop default-import para módulos CJS
+    "allowSyntheticDefaultImports": true,
+
+    // ── Other Outputs ──────────────────────────────────────────────────────────
+    "sourceMap": true,                        // Mapas de fuente para debug con TS original
+    "declaration": true,                      // Genera .d.ts (útil si se publica como lib)
+    "declarationMap": true,                   // "Go to definition" en IDEs apunta a .ts
+
+    // ── Strict Type-Checking ───────────────────────────────────────────────────
+    "strict": true,                           // Habilita todo el bloque de opciones estrictas
+    "noImplicitAny": true,                    // Prohíbe 'any' implícito: crítico en datos EEG
+    "noUncheckedIndexedAccess": true,         // arr[i] → T | undefined: evita bugs en buffers
+    "exactOptionalPropertyTypes": true,       // Distingue campo ausente de campo = undefined
+
+    // ── Style Options (activar progresivamente) ────────────────────────────────
+    // "noImplicitReturns": true,
+    // "noUnusedLocals": true,
+    // "noUnusedParameters": true,
+    // "noFallthroughCasesInSwitch": true,
+
+    // ── Recommended Options ────────────────────────────────────────────────────
+    "skipLibCheck": true,                     // No re-tipea .d.ts de node_modules
+    "forceConsistentCasingInFileNames": true, // Evita bugs en FS case-insensitive
+    "isolatedModules": true,                  // Compatible con esbuild / swc
+    "moduleDetection": "force"                // Trata todos los archivos como módulos ES
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
