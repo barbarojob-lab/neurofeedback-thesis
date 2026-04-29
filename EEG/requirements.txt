@@ -1,0 +1,2 @@
+# Dependencies for EEG dataset download scripts
+huggingface_hub>=1.12

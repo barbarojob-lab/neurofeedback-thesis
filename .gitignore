@@ -67,6 +67,14 @@ pids/
 *.seed
 *.pid.lock
 
+# Downloaded datasets
+data/yoga_eeg/
+EEG/data/
+
+# Generated training artifacts (reproducible via scripts)
+data/sessions.npz
+ml-service/models/
+
 # IDE/editor
 .vscode/*
 !.vscode/extensions.json
