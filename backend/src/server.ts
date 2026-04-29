@@ -77,6 +77,7 @@
 import http     from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { parseDatasetMetadata, type DatasetMetadata } from "./datasets/parser";
+import { DatasetReplayer } from "./datasets/replayer";
 
 // ── Módulos DSP ──────────────────────────────────────────────────────────────
 import { NotchFilter }         from "./filters/notch-filter";
@@ -114,9 +115,9 @@ type ChannelSample = Record<EEGChannel, number>;
  * Modo de adquisición de EEG:
  *   "simulator" — EEGSimulator (desarrollo y testing)
  *   "hardware"  — Esperar conexión de dispositivo real (OpenBCI, Muse, etc.)
- * Default: "simulator" para que funcione sin hardware
+ * Default: "hardware" para evitar simulación accidental en validación real
  */
-const EEG_MODE = (process.env.EEG_MODE ?? "simulator") as "simulator" | "hardware";
+const EEG_MODE = (process.env.EEG_MODE ?? "hardware") as "simulator" | "hardware";
 
 /** Intervalo del log de latencia (ms) */
 const LATENCY_LOG_INTERVAL_MS = 5_000;
@@ -341,7 +342,17 @@ const mlClient = new MLServiceClient("ws://localhost:8001/ws");
 // ---------------------------------------------------------------------------
 
 const simulator = new EEGSimulator();
+const datasetReplayer = new DatasetReplayer<EEGChannel>(SAMPLE_RATE, EEG_CHANNELS);
 const db        = new SessionDB();
+
+type AcquisitionSource = "none" | "simulator" | "dataset";
+let activeSource: AcquisitionSource = "none";
+
+function stopAcquisition(): void {
+  simulator.stop();
+  datasetReplayer.stop();
+  activeSource = "none";
+}
 
 /**
  * Log de configuración al iniciar.
@@ -386,6 +397,7 @@ function resetPipeline(config: SessionConfig): void {
     state.lastFiltered = 0;
   }
   simulator.reset();
+  datasetReplayer.reset();
   console.log("[Pipeline] Reset completado para nueva sesión");
 }
 
@@ -494,7 +506,7 @@ async function processSample(rawByChannel: ChannelSample, wss: WebSocketServer):
     const mlWindow = ML_CHANNELS.map((channel) => Array.from(windowsByChannel[channel]!));
     const mlBandPowers = Object.fromEntries(
       ML_CHANNELS.map((channel) => [channel, bandsByChannel[channel]])
-    ) as Record<string, BandPowers>;
+    ) as unknown as Record<string, Record<string, number>>;
 
     const fzBands = bandsByChannel.Fz;
     const thetaBeta = bandPow.computeThetaBetaRatio(fzBands);
@@ -502,7 +514,7 @@ async function processSample(rawByChannel: ChannelSample, wss: WebSocketServer):
     const thetaFz = fzBands.theta;
     const thetaLateral = (bandsByChannel.F3.theta + bandsByChannel.F4.theta) / 2;
     const frontalSpecificity = thetaFz / Math.max(thetaLateral, 1e-12);
-    const frontalThreshold = currentSession?.config?.frontalSpecificityThreshold ?? DEFAULT_FRONTAL_SPECIFICITY_THRESHOLD;
+    const frontalThreshold = DEFAULT_FRONTAL_SPECIFICITY_THRESHOLD;
     const frontalSpecificityValid = frontalSpecificity >= frontalThreshold;
 
     const fp1Peak = Math.max(...channelPipelines.Fp1.hopBuffer.map(v => Math.abs(v)), 0);
@@ -614,7 +626,7 @@ function handleMessage(ws: WebSocket, wss: WebSocketServer, raw: string): void {
     case "start_session": {
       if (currentSession) {
         // Detener sesión anterior sin error — cliente reconecta
-        simulator.stop();
+        stopAcquisition();
         console.log(`[Session] Sesión anterior ${currentSession.id} reemplazada.`);
       }
 
@@ -630,11 +642,29 @@ function handleMessage(ws: WebSocket, wss: WebSocketServer, raw: string): void {
 
       resetPipeline(config);
 
-      // Iniciar generación de samples — cada sample dispara processSample
-      simulator.start((sample) => processSample(sample, wss));
+      // En modo hardware, solo aceptar fuente real (dataset cargado o driver real futuro).
+      if (EEG_MODE === "hardware") {
+        if (!loadedDataset || !datasetReplayer.isLoaded()) {
+          currentSession = null;
+          send(ws, {
+            type: "error",
+            message:
+              "EEG_MODE=hardware activo: falta dataset real cargado. " +
+              "Usa CARGAR DATASET y luego inicia sesión.",
+          });
+          return;
+        }
+
+        datasetReplayer.start((sample) => processSample(sample, wss));
+        activeSource = "dataset";
+      } else {
+        // Solo permitido en modo de desarrollo explícito.
+        simulator.start((sample) => processSample(sample, wss));
+        activeSource = "simulator";
+      }
 
       send(ws, { type: "session_started", sessionId });
-      console.log(`[Session] ▶  Sesión iniciada: ${sessionId}`);
+      console.log(`[Session] ▶  Sesión iniciada: ${sessionId} (${activeSource})`);
       break;
     }
 
@@ -645,7 +675,7 @@ function handleMessage(ws: WebSocket, wss: WebSocketServer, raw: string): void {
         return;
       }
 
-      simulator.stop();
+      stopAcquisition();
       const stoppedId  = currentSession.id;
       const durationMs = Date.now() - currentSession.startedAt;
       currentSession   = null;
@@ -668,7 +698,9 @@ function handleMessage(ws: WebSocket, wss: WebSocketServer, raw: string): void {
       }
 
       currentSession.tranceMode = enabled;
-      simulator.setTranceMode(enabled);
+      if (activeSource === "simulator") {
+        simulator.setTranceMode(enabled);
+      }
       send(ws, { type: "trance_mode_set", enabled });
       console.log(`[Session] Trance mode: ${enabled ? "ON 🌀" : "OFF"}`);
       break;
@@ -698,7 +730,8 @@ function handleMessage(ws: WebSocket, wss: WebSocketServer, raw: string): void {
       }
 
       parseDatasetMetadata(datasetPath)
-        .then((meta) => {
+        .then(async (meta) => {
+          await datasetReplayer.load(datasetPath);
           loadedDataset = meta;
           send(ws, { type: "dataset_loaded", dataset: meta });
           console.log(
@@ -839,7 +872,7 @@ function main(): void {
   const shutdown = (signal: string) => {
     console.log(`\n[Server] ${signal} recibido. Cerrando limpiamente…`);
     clearInterval(latencyTimer);
-    simulator.stop();
+    stopAcquisition();
 
     wss.clients.forEach((client) => client.terminate());
     wss.close(() => {

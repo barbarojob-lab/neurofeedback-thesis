@@ -90,8 +90,13 @@ async function parseCsvMetadata(filePath: string): Promise<DatasetMetadata> {
   let sampleRate = 250;
   const timestampIdx = columns.findIndex((c) => c.toLowerCase() === "timestamp");
   if (timestampIdx >= 0 && rows.length > 3) {
-    const t0 = Number(rows[0].split(",")[timestampIdx]);
-    const t1 = Number(rows[1].split(",")[timestampIdx]);
+    const row0 = rows[0];
+    const row1 = rows[1];
+    if (!row0 || !row1) {
+      throw new Error("CSV invalido: filas insuficientes para estimar sample rate");
+    }
+    const t0 = Number(row0.split(",")[timestampIdx]);
+    const t1 = Number(row1.split(",")[timestampIdx]);
     const dt = t1 - t0;
     if (Number.isFinite(dt) && dt > 0) {
       sampleRate = Math.round(1000 / dt);
