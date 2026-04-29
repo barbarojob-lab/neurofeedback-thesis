@@ -31,9 +31,10 @@ sys.path.insert(0, os.path.dirname(__file__))
 from src.classifier import CHANNELS_ORDERED, N_FEATURES
 
 # ─── Constantes ──────────────────────────────────────────────────────────────
-FS_TARGET = 250          # Hz — frecuencia objetivo tras resampleo
-WIN_SEC   = 2.0          # s  — tamaño de ventana
-HOP_SEC   = 1.0          # s  — paso entre ventanas (50 % solapamiento)
+FS_TARGET   = 250              # Hz — frecuencia objetivo tras resampleo
+WIN_SAMPLES = 512              # muestras — igual que WINDOW_SIZE del backend
+WIN_SEC     = WIN_SAMPLES / FS_TARGET  # ≈ 2.048 s (potencia de 2, ~2 s)
+HOP_SEC     = 1.0              # s  — paso entre ventanas (50 % solapamiento)
 THETA     = (4.0, 8.0)   # Hz
 BETA      = (13.0, 30.0) # Hz
 SKIP_SEC  = 2.0          # s  — margen a descartar al inicio/fin de segmento

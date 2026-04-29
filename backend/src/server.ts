@@ -98,12 +98,15 @@ import type { SessionConfig } from "./types";
 
 const PORT        = Number(process.env.PORT ?? 8080);
 const SAMPLE_RATE = 250;   // Hz — OpenBCI Cyton default
-const WINDOW_SIZE = 256;   // samples — 1.024 s de epoch
-const HOP_SIZE    = 64;    // samples — 75 % de overlap → ~4 payloads/s
+const WINDOW_SIZE = 512;   // samples — 2.048 s de epoch (≈ 2 s, potencia de 2, igual que entrenamiento ML)
+const HOP_SIZE    = 64;    // samples — 87.5 % de overlap → ~4 payloads/s
 
 const EEG_CHANNELS = [
   "Fz", "Fp1", "Fp2", "F3", "F4", "C3", "Cz", "C4", "P3", "Pz", "P4", "O1", "O2",
 ] as const;
+const ML_CHANNELS = [
+  "Fz", "Fp1", "F3", "C3", "Pz", "O1", "F4", "C4", "P4", "O2", "Cz",
+] as const satisfies readonly typeof EEG_CHANNELS[number][];
 type EEGChannel = typeof EEG_CHANNELS[number];
 type ChannelSample = Record<EEGChannel, number>;
 
@@ -476,7 +479,7 @@ async function processSample(rawByChannel: ChannelSample, wss: WebSocketServer):
 
     const bandsByChannel: Record<EEGChannel, BandPowers> = {} as Record<EEGChannel, BandPowers>;
     const magnitudesByChannel: Record<EEGChannel, Float32Array> = {} as Record<EEGChannel, Float32Array>;
-    const multiChannelWindow: number[][] = [];
+    const windowsByChannel: Partial<Record<EEGChannel, Float32Array>> = {};
 
     for (const channel of EEG_CHANNELS) {
       const state = channelPipelines[channel];
@@ -485,8 +488,13 @@ async function processSample(rawByChannel: ChannelSample, wss: WebSocketServer):
       const magnitudes = fftAn.analyze(hannWindow);
       magnitudesByChannel[channel] = magnitudes;
       bandsByChannel[channel] = bandPow.extract(magnitudes);
-      multiChannelWindow.push(Array.from(rawWindow));
+      windowsByChannel[channel] = rawWindow;
     }
+
+    const mlWindow = ML_CHANNELS.map((channel) => Array.from(windowsByChannel[channel]!));
+    const mlBandPowers = Object.fromEntries(
+      ML_CHANNELS.map((channel) => [channel, bandsByChannel[channel]])
+    ) as Record<string, BandPowers>;
 
     const fzBands = bandsByChannel.Fz;
     const thetaBeta = bandPow.computeThetaBetaRatio(fzBands);
@@ -510,10 +518,8 @@ async function processSample(rawByChannel: ChannelSample, wss: WebSocketServer):
     // ── Etapa 3: Clasificación via ML Service ────────────────────────
     // ✅ NUEVO: Llamar al clasificador (retorna null si el servicio no está disponible)
     const mlResult = await mlClient.processWindow({
-      eeg_window: multiChannelWindow as number[][],
-      band_powers_per_channel: Object.fromEntries(
-        EEG_CHANNELS.map(ch => [ch, bandsByChannel[ch]])
-      ) as Record<EEGChannel, BandPowers>,
+      eeg_window: mlWindow,
+      band_powers_per_channel: mlBandPowers,
       frontal_specificity: frontalSpecificity,
     });
 

@@ -93,7 +93,7 @@ class ProcessWindowRequest(BaseModel):
 
     eeg_window:
         Lista de N_CHANNELS listas de flotantes.
-        Cada sublista contiene n_samples (normalmente 500) muestras en µV.
+        Cada sublista contiene n_samples (normalmente 512) muestras en µV.
         Ya debe estar filtrada (notch + bandpass) por el backend Node.js.
 
     band_powers_per_channel:

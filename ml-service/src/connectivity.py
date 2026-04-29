@@ -48,7 +48,7 @@ CHANNEL_INDEX: Dict[str, int] = {ch: i for i, ch in enumerate(CHANNELS)}
 
 # Parámetros del pipeline de señal (deben coincidir con server.ts)
 FS          = 250    # Hz — OpenBCI Cyton default
-WINDOW_SIZE = 500    # samples — 2 s a 250 Hz
+WINDOW_SIZE = 512    # samples — 2.048 s a 250 Hz (potencia de 2, igual que backend y entrenamiento)
 HOP_SIZE    = 64     # samples — 4 payloads/s, overlap 87.5 %
 
 # Banda theta: 4–8 Hz
@@ -116,7 +116,7 @@ def compute_coherence_matrix(
 
     Parámetros Welch:
         nperseg = 500 (2 s a 250 Hz):
-          Resolución espectral Δf = fs/nperseg = 250/500 = 0.5 Hz.
+          Resolución espectral Δf = fs/nperseg = 250/512 ≈ 0.488 Hz.
           Necesaria para resolver la banda 4–8 Hz (que tiene solo 4 Hz de
           ancho) con al menos 8 bins de frecuencia. Menor nperseg → Δf
           mayor y pérdida de resolución dentro de la banda theta.

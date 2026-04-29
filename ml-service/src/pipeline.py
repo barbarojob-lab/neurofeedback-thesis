@@ -8,7 +8,7 @@ del módulo de análisis de conectividad EEG:
   3. Clasificador ML de estado (awake / induction / trance)
 
 Entrada:
-  - Ventana EEG de 2 s (N_CHANNELS × 500 muestras), ya filtrada por la
+  - Ventana EEG de ~2 s (N_CHANNELS × 512 muestras), ya filtrada por la
     cadena notch+bandpass del backend Node.js existente.
   - Potencias de banda por canal (del BandPowerExtractor existente).
   - Frontal specificity index (del server.ts existente).
@@ -22,12 +22,12 @@ Salida:
 Integración con server.ts:
   El backend Node.js se conecta a este servicio por WebSocket en el
   puerto 8001. Cada vez que procesa un hop (64 muestras, ~256 ms), envía
-  la ventana completa de 500 muestras + band powers al servicio Python,
+  la ventana completa de 512 muestras + band powers al servicio Python,
   recibe el resultado y lo incluye en el FeedbackPayload al frontend.
 
   Pseudo-código en server.ts:
     const mlResult = await mlService.processWindow({
-      eeg_window:              multiChannelBuffer,   // float[][] [11][500]
+      eeg_window:              multiChannelBuffer,   // float[][] [11][512]
       band_powers_per_channel: allChannelBandPowers, // Record<ch, BandPowers>
       frontal_specificity:     frontalSpecificity,   // number
     });
@@ -117,7 +117,7 @@ def process_window(
 
     ── Flujo interno ───────────────────────────────────────────────────────
 
-      eeg_window [N_CH × 500]
+      eeg_window [N_CH × 512]
           │
           ├──► compute_coherence_matrix()  → coh_matrix [N_CH × N_CH]
           │         (Welch, theta 4–8 Hz)
@@ -144,7 +144,7 @@ def process_window(
 
     Args:
         eeg_window:
-            shape (N_CHANNELS, 500) — ventana de 2 s a 250 Hz.
+            shape (N_CHANNELS, 512) — ventana de ~2.048 s a 250 Hz.
             ⚠️  Ya debe estar filtrada (notch 50 Hz + bandpass 1–40 Hz)
             por el pipeline existente en server.ts. NO re-filtrar aquí.
             Orden de canales: ["Fz", "Fp1", "F3", "C3", "Pz", "O1",
