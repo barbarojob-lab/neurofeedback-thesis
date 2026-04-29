@@ -111,6 +111,55 @@ export interface SessionConfig {
    * Default 2.0 (recomendado para neurofeedback; valores > 4 son muy reactivos).
    */
   sigmoidK?: number;
+  /** Umbral mínimo de especificidad frontal (theta Fz / media theta F3-F4) */
+  frontalSpecificityThreshold?: number;
+}
+
+/**
+ * Valida y normaliza una SessionConfig.
+ * Retorna una copia con valores por defecto y rangos garantizados.
+ *
+ * @param config Configuración potencialmente incompleta o fuera de rango
+ * @returns      Configuración normalizada y validada
+ */
+export function validateSessionConfig(config: SessionConfig = {}): Required<SessionConfig> {
+  let thetaThreshold = config.thetaThreshold ?? 0;
+  let thetaPeakTbrThreshold = config.thetaPeakTbrThreshold ?? 2.5;
+  let sigmoidK = config.sigmoidK ?? 2.0;
+  let frontalSpecificityThreshold = config.frontalSpecificityThreshold ?? 1.5;
+
+  // Validar rangos y sanitizar valores fuera de límites
+  if (!Number.isFinite(thetaThreshold)) {
+    console.warn("[validateSessionConfig] thetaThreshold no es un número válido, usando default 0");
+    thetaThreshold = 0;
+  }
+
+  if (!Number.isFinite(thetaPeakTbrThreshold) || thetaPeakTbrThreshold <= 0) {
+    console.warn("[validateSessionConfig] thetaPeakTbrThreshold inválido, usando default 2.5");
+    thetaPeakTbrThreshold = 2.5;
+  }
+
+  if (!Number.isFinite(sigmoidK) || sigmoidK <= 0) {
+    console.warn("[validateSessionConfig] sigmoidK debe ser > 0, usando default 2.0");
+    sigmoidK = 2.0;
+  }
+
+  if (!Number.isFinite(frontalSpecificityThreshold) || frontalSpecificityThreshold <= 0) {
+    console.warn("[validateSessionConfig] frontalSpecificityThreshold inválido, usando default 1.5");
+    frontalSpecificityThreshold = 1.5;
+  }
+
+  // Limitar sigmoidK a rango razonable (0.1 a 10)
+  if (sigmoidK > 10) {
+    console.warn("[validateSessionConfig] sigmoidK > 10 es muy reactivo, limitando a 10");
+    sigmoidK = 10;
+  }
+  if (sigmoidK < 0.1) {
+    console.warn("[validateSessionConfig] sigmoidK < 0.1 es muy inerte, limitando a 0.1");
+    sigmoidK = 0.1;
+  }
+
+  return { thetaThreshold, thetaPeakTbrThreshold, sigmoidK, frontalSpecificityThreshold };
 }
 
 // ---------------------------------------------------------------------------
@@ -127,9 +176,10 @@ export class FeedbackEngine {
   private readonly historySize = 8; // ~2 s a 4 epochs/s
 
   constructor(config: SessionConfig = {}) {
-    this.thetaThreshold     = config.thetaThreshold      ?? 0;
-    this.thetaPeakTbrThresh = config.thetaPeakTbrThreshold ?? 2.5;
-    this.sigmoidK           = config.sigmoidK             ?? 2.0;
+    const validated = validateSessionConfig(config);
+    this.thetaThreshold     = validated.thetaThreshold;
+    this.thetaPeakTbrThresh = validated.thetaPeakTbrThreshold;
+    this.sigmoidK           = validated.sigmoidK;
   }
 
   // ---------------------------------------------------------------------------

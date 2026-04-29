@@ -157,6 +157,8 @@ export interface SessionConfig {
    * Default 2.0 — balance responsividad/estabilidad para EEG.
    */
   sigmoidK?: number;
+  /** Umbral mínimo de especificidad frontal theta(Fz)/media(theta(F3),theta(F4)) */
+  frontalSpecificityThreshold?: number;
 }
 
 /** Medida subjetiva de estado reportada por el paciente o terapeuta */
@@ -171,21 +173,101 @@ export interface SubjectiveMeasure {
 }
 
 // ---------------------------------------------------------------------------
+// ML — ClassifierPrediction (espejo de backend/src/ml-client.ts)
+// ---------------------------------------------------------------------------
+
+/**
+ * Predicción del clasificador ML para el estado del paciente.
+ * Basado en ensemble SVM + Random Forest.
+ */
+export interface ClassifierPrediction {
+  /** Estado predicho: 0=awake, 1=induction, 2=trance */
+  predicted_class: number;
+  /** Etiqueta legible del estado */
+  predicted_label: "awake" | "induction" | "trance";
+  /** Confianza de la predicción [0, 1] */
+  confidence: number;
+  /** Probabilidades por clase [normalizado a suma ≈ 1] */
+  class_probabilities: {
+    awake: number;
+    induction: number;
+    trance: number;
+  };
+  /** true cuando confidence >= 0.50 */
+  is_confident: boolean;
+  /** Método usado: 'ml_ensemble' o 'heuristic_fallback' */
+  method: "ml_ensemble" | "heuristic_fallback";
+}
+
+/** Conectividad y features del ML service */
+export interface ConnectivityFeatures {
+  coh_Fz_Pz: number;
+  coh_F3_F4: number;
+  coh_C3_C4: number;
+  coh_Fz_Cz: number;
+  coh_O1_O2: number;
+  plv_Fz_Pz: number;
+  plv_F3_F4: number;
+  plv_C3_C4: number;
+  plv_Fz_Cz: number;
+  plv_O1_O2: number;
+}
+
+export interface MLServiceResult {
+  coherence_matrix: number[][];
+  plv_matrix: number[][];
+  channel_labels: string[];
+  connectivity_features: ConnectivityFeatures;
+  classifier_prediction: ClassifierPrediction;
+  feature_vector: number[];
+  processing_ms: number;
+}
+
+// ---------------------------------------------------------------------------
 // Protocolo WebSocket — Mensajes entrantes (server → client)
 // ---------------------------------------------------------------------------
 
 /** Payload principal enviado cada ~256 ms (cada hopSize muestras) */
 export interface FeedbackPayload {
-  type           : "eeg_data";
-  timestamp      : number;
-  /** Último sample EEG filtrado [µV] — para renderizar la forma de onda */
-  filteredSample : number;
-  bandPowers     : BandPowers;
-  thetaBeta      : ThetaBetaResult;
-  zScore         : ZScoreResult;
-  command        : FeedbackCommand;
+  type            : "eeg_data";
+  timestamp       : number;
+  /** Último sample EEG filtrado [µV] — compatibilidad hacia atrás */
+  filteredSample  : number;
+  /**
+   * Todos los samples filtrados del hop actual [µV].
+   * Longitud = hopSize (64 a 250 Hz). Usar esto para el osciloscopio:
+   * permite dibujar a 250 sps reales en lugar de los 4 muestras/s del
+   * filteredSample individual.
+   */
+  filteredSamples : number[];
+  frontalSpecificity      : number;
+  frontalSpecificityValid : boolean;
+  artifactDetected        : boolean;
+  topographyTheta         : Record<string, number>;
+  inspection: {
+    channel: string;
+    filteredSamples: number[];
+    fftMagnitudes: number[];
+    bandPowers: BandPowers;
+  };
+  bandPowers      : BandPowers;
+  thetaBeta       : ThetaBetaResult;
+  // ✅ NUEVO: Predicción de estado del clasificador
+  state_prediction: ClassifierPrediction | null;
+  // ✅ NUEVO: Resultados de conectividad y ML
+  connectivity    : MLServiceResult | null;
   /** Tiempo de procesamiento del epoch en el servidor [ms] — debe ser < 5 ms */
-  pipelineMs     : number;
+  pipelineMs      : number;
+}
+
+export interface DatasetMetadata {
+  id: string;
+  sourcePath: string;
+  format: "edf" | "csv";
+  channels: string[];
+  sampleRate: number;
+  durationSec: number;
+  totalSamples: number;
 }
 
 export interface ServerHelloMessage {
@@ -194,6 +276,7 @@ export interface ServerHelloMessage {
   sampleRate : number;
   windowSize : number;
   hopSize    : number;
+  dataset?   : DatasetMetadata | null;
   session    : { id: string; tranceMode: boolean } | null;
 }
 
@@ -221,6 +304,16 @@ export interface TranceModSetMessage {
   enabled : boolean;
 }
 
+export interface InspectionChannelSetMessage {
+  type    : "inspection_channel_set";
+  channel : string;
+}
+
+export interface DatasetLoadedMessage {
+  type    : "dataset_loaded";
+  dataset : DatasetMetadata;
+}
+
 export interface ServerErrorMessage {
   type    : "error";
   message : string;
@@ -235,6 +328,8 @@ export type ServerMessage =
   | PongMessage
   | SubjectiveSavedMessage
   | TranceModSetMessage
+  | InspectionChannelSetMessage
+  | DatasetLoadedMessage
   | ServerErrorMessage;
 
 // ---------------------------------------------------------------------------
@@ -245,29 +340,133 @@ export type WSMessage =
   | { type: "start_session";     payload: SessionConfig       }
   | { type: "stop_session"                                    }
   | { type: "set_trance_mode";   payload: { enabled: boolean }}
+  | { type: "set_inspection_channel"; payload: { channel: string }}
+  | { type: "load_dataset"; payload: { path: string }}
   | { type: "ping"                                            }
   | { type: "submit_subjective"; payload: SubjectiveMeasure   };
 
 // ---------------------------------------------------------------------------
-// Type guards — para validar mensajes en runtime sin casteos ciegos
+// Type Guards — validación en runtime de mensajes WebSocket
 // ---------------------------------------------------------------------------
 
-export function isFeedbackPayload(msg: ServerMessage): msg is FeedbackPayload {
-  return msg.type === "eeg_data";
+type UnknownObject = Record<string, unknown>;
+
+function asObject(msg: unknown): UnknownObject | null {
+  return typeof msg === "object" && msg !== null
+    ? (msg as UnknownObject)
+    : null;
 }
 
-export function isServerHello(msg: ServerMessage): msg is ServerHelloMessage {
-  return msg.type === "server_hello";
+/**
+ * Valida que un objeto desconocido es un FeedbackPayload.
+ * Usado en el hook useEEGSocket para descartar mensajes mal formados.
+ */
+export function isFeedbackPayload(msg: unknown): msg is FeedbackPayload {
+  const obj = asObject(msg);
+  if (!obj) return false;
+
+  return (
+    obj.type === "eeg_data" &&
+    typeof obj.timestamp === "number" &&
+    typeof obj.filteredSample === "number" &&
+    typeof obj.pipelineMs === "number" &&
+    typeof obj.frontalSpecificity === "number" &&
+    typeof obj.frontalSpecificityValid === "boolean" &&
+    typeof obj.artifactDetected === "boolean" &&
+    asObject(obj.topographyTheta) !== null &&
+    asObject(obj.inspection) !== null &&
+    asObject(obj.bandPowers) !== null &&
+    asObject(obj.thetaBeta) !== null
+    // state_prediction puede ser null, no es obligatorio validarlo
+  );
 }
 
-export function isSessionStarted(msg: ServerMessage): msg is SessionStartedMessage {
-  return msg.type === "session_started";
+/**
+ * Valida que un objeto es un ServerHelloMessage.
+ */
+export function isServerHello(msg: unknown): msg is ServerHelloMessage {
+  const obj = asObject(msg);
+  if (!obj) return false;
+
+  return (
+    obj.type === "server_hello" &&
+    typeof obj.version === "string"
+  );
 }
 
-export function isSessionStopped(msg: ServerMessage): msg is SessionStoppedMessage {
-  return msg.type === "session_stopped";
+/**
+ * Valida que un objeto es un SessionStartedMessage.
+ */
+export function isSessionStarted(msg: unknown): msg is SessionStartedMessage {
+  const obj = asObject(msg);
+  if (!obj) return false;
+
+  return (
+    obj.type === "session_started" &&
+    typeof obj.sessionId === "string"
+  );
 }
 
-export function isServerError(msg: ServerMessage): msg is ServerErrorMessage {
-  return msg.type === "error";
+/**
+ * Valida que un objeto es un SessionStoppedMessage.
+ */
+export function isSessionStopped(msg: unknown): msg is SessionStoppedMessage {
+  const obj = asObject(msg);
+  return obj !== null && obj.type === "session_stopped";
+}
+
+/**
+ * Valida que un objeto es un PongMessage.
+ */
+export function isPong(msg: unknown): msg is PongMessage {
+  const obj = asObject(msg);
+  if (!obj) return false;
+
+  return (
+    obj.type === "pong" &&
+    typeof obj.timestamp === "number"
+  );
+}
+
+/**
+ * Valida que un objeto es un ServerErrorMessage.
+ */
+export function isServerError(msg: unknown): msg is ServerErrorMessage {
+  const obj = asObject(msg);
+  if (!obj) return false;
+
+  return (
+    obj.type === "error" &&
+    typeof obj.message === "string"
+  );
+}
+
+/**
+ * Valida que un objeto es un TranceModSetMessage.
+ */
+export function isTranceModeSet(msg: unknown): msg is TranceModSetMessage {
+  const obj = asObject(msg);
+  if (!obj) return false;
+
+  return (
+    obj.type === "trance_mode_set" &&
+    typeof obj.enabled === "boolean"
+  );
+}
+
+export function isInspectionChannelSet(msg: unknown): msg is InspectionChannelSetMessage {
+  const obj = asObject(msg);
+  if (!obj) return false;
+
+  return (
+    obj.type === "inspection_channel_set" &&
+    typeof obj.channel === "string"
+  );
+}
+
+export function isDatasetLoaded(msg: unknown): msg is DatasetLoadedMessage {
+  const obj = asObject(msg);
+  if (!obj) return false;
+
+  return obj.type === "dataset_loaded" && asObject(obj.dataset) !== null;
 }

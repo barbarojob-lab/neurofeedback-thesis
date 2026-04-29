@@ -60,6 +60,7 @@
  *     { type: 'start_session',    payload: SessionConfig      }
  *     { type: 'stop_session'                                  }
  *     { type: 'set_trance_mode',  payload: { enabled: boolean }}
+ *     { type: 'set_inspection_channel', payload: { channel: EEGChannel }}
  *     { type: 'ping'                                          }
  *     { type: 'submit_subjective', payload: SubjectiveMeasure }
  *
@@ -68,12 +69,14 @@
  *     { type: 'pong',              timestamp: number          }
  *     { type: 'session_started',   sessionId: string          }
  *     { type: 'session_stopped'                               }
+ *     { type: 'inspection_channel_set', channel: EEGChannel   }
  *     { type: 'subjective_saved',  sessionId: string          }
  *     { type: 'error',             message: string            }
  */
 
 import http     from "http";
 import { WebSocketServer, WebSocket } from "ws";
+import { parseDatasetMetadata, type DatasetMetadata } from "./datasets/parser";
 
 // ── Módulos DSP ──────────────────────────────────────────────────────────────
 import { NotchFilter }         from "./filters/notch-filter";
@@ -82,14 +85,12 @@ import { SlidingWindow }       from "./dsp/sliding-window";
 import { FFTAnalyzer }         from "./dsp/fft-analyzer";
 import { BandPowerExtractor }  from "./dsp/band-power";
 
-// ── Módulos adaptativos ──────────────────────────────────────────────────────
-import { RunningZScore }   from "./adaptive/running-zscore";
-import { FeedbackEngine }  from "./adaptive/feedback-engine";
+// ── Módulos ML ──────────────────────────────────────────────────────────────
+import { MLServiceClient, type MLServiceResult, type ClassifierPrediction } from "./ml-client";
 
 // ── Tipos compartidos ────────────────────────────────────────────────────────
 import type { BandPowers, ThetaBetaResult }  from "./dsp/band-power";
-import type { ZScoreResult }                 from "./adaptive/running-zscore";
-import type { FeedbackCommand, SessionConfig } from "./adaptive/feedback-engine";
+import type { SessionConfig } from "./types";
 
 // ---------------------------------------------------------------------------
 // Constantes de configuración
@@ -100,11 +101,27 @@ const SAMPLE_RATE = 250;   // Hz — OpenBCI Cyton default
 const WINDOW_SIZE = 256;   // samples — 1.024 s de epoch
 const HOP_SIZE    = 64;    // samples — 75 % de overlap → ~4 payloads/s
 
+const EEG_CHANNELS = [
+  "Fz", "Fp1", "Fp2", "F3", "F4", "C3", "Cz", "C4", "P3", "Pz", "P4", "O1", "O2",
+] as const;
+type EEGChannel = typeof EEG_CHANNELS[number];
+type ChannelSample = Record<EEGChannel, number>;
+
+/**
+ * Modo de adquisición de EEG:
+ *   "simulator" — EEGSimulator (desarrollo y testing)
+ *   "hardware"  — Esperar conexión de dispositivo real (OpenBCI, Muse, etc.)
+ * Default: "simulator" para que funcione sin hardware
+ */
+const EEG_MODE = (process.env.EEG_MODE ?? "simulator") as "simulator" | "hardware";
+
 /** Intervalo del log de latencia (ms) */
 const LATENCY_LOG_INTERVAL_MS = 5_000;
 
 /** Mínimo de samples del z-score antes de enviar comandos de feedback */
 const ZSCORE_WARMUP_SAMPLES = 30;
+const DEFAULT_FRONTAL_SPECIFICITY_THRESHOLD = 1.5;
+const ARTIFACT_THRESHOLD_UV = 100;
 
 // ---------------------------------------------------------------------------
 // Tipos del protocolo WS
@@ -119,20 +136,34 @@ interface SubjectiveMeasure {
 }
 
 interface FeedbackPayload {
-  type           : "eeg_data";
-  timestamp      : number;
-  filteredSample : number;       // último sample filtrado [µV]
-  bandPowers     : BandPowers;
-  thetaBeta      : ThetaBetaResult;
-  zScore         : ZScoreResult;
-  command        : FeedbackCommand;
-  pipelineMs     : number;       // tiempo de procesamiento del epoch [ms]
+  type            : "eeg_data";
+  timestamp       : number;
+  filteredSample  : number;        // último sample filtrado [µV] (compatibilidad)
+  filteredSamples : number[];      // todos los samples del hop [µV] — para el osciloscopio
+  frontalSpecificity      : number;
+  frontalSpecificityValid : boolean;
+  artifactDetected        : boolean;
+  topographyTheta         : Record<EEGChannel, number>; // theta normalizada [0,1]
+  inspection: {
+    channel: EEGChannel;
+    filteredSamples: number[];
+    fftMagnitudes: number[];
+    bandPowers: BandPowers;
+  };
+  bandPowers      : BandPowers;
+  thetaBeta       : ThetaBetaResult;
+  // ✅ NUEVO: Predicción del estado (reemplaza command)
+  state_prediction: ClassifierPrediction | null;
+  connectivity    : MLServiceResult | null;  // Resultados de conectividad del ML service
+  pipelineMs      : number;        // tiempo de procesamiento del epoch [ms]
 }
 
 type IncomingMessage =
   | { type: "start_session";    payload: SessionConfig                }
   | { type: "stop_session"                                            }
   | { type: "set_trance_mode";  payload: { enabled: boolean }        }
+  | { type: "set_inspection_channel"; payload: { channel: EEGChannel } }
+  | { type: "load_dataset"; payload: { path: string }                 }
   | { type: "ping"                                                    }
   | { type: "submit_subjective"; payload: SubjectiveMeasure          };
 
@@ -158,13 +189,14 @@ class EEGSimulator {
   private intervalId: ReturnType<typeof setInterval> | null = null;
   private tranceMode = false;
   private t = 0; // tiempo en muestras
+  private blinkCountdown = 0;
 
-  start(onSample: (sample: number) => void): void {
+  start(onSample: (sample: ChannelSample) => void): void {
     if (this.intervalId) return;
     const intervalMs = 1000 / SAMPLE_RATE; // 4 ms entre samples a 250 Hz
 
     this.intervalId = setInterval(() => {
-      const sample = this._generateSample();
+      const sample = this._generateSampleFrame();
       onSample(sample);
       this.t++;
     }, intervalMs);
@@ -183,30 +215,72 @@ class EEGSimulator {
 
   reset(): void {
     this.t = 0;
+    this.blinkCountdown = 0;
   }
 
-  private _generateSample(): number {
+  private _generateSampleFrame(): ChannelSample {
+    const frame = {} as ChannelSample;
+    for (const channel of EEG_CHANNELS) {
+      frame[channel] = this._generateChannelSample(channel);
+    }
+    return frame;
+  }
+
+  private _generateChannelSample(channel: EEGChannel): number {
     const fs = SAMPLE_RATE;
     const t  = this.t / fs;
 
-    if (this.tranceMode) {
-      // Señal theta-dominante: 6 Hz fuerte + 10 Hz alfa suave + ruido
-      return (
-        15 * Math.sin(2 * Math.PI * 6  * t) +   // theta fuerte
-         5 * Math.sin(2 * Math.PI * 10 * t) +   // alfa suave
-         2 * Math.sin(2 * Math.PI * 50 * t) +   // interferencia 50 Hz (para demostrar notch)
-         this._noise(3)
-      );
-    } else {
-      // Señal beta-dominante: estado alerta / activo
-      return (
-         5 * Math.sin(2 * Math.PI * 20 * t) +   // beta medio
-         4 * Math.sin(2 * Math.PI * 10 * t) +   // alfa moderado
-         3 * Math.sin(2 * Math.PI * 6  * t) +   // theta bajo
-         2 * Math.sin(2 * Math.PI * 50 * t) +   // interferencia 50 Hz
-         this._noise(4)
-      );
+    const thetaBase = this.tranceMode ? 15 : 3;
+    const betaBase = this.tranceMode ? 3 : 5;
+    const alphaBase = this.tranceMode ? 5 : 4;
+
+    const thetaGainByChannel: Record<EEGChannel, number> = {
+      Fz: 1.0,
+      Fp1: 0.55,
+      Fp2: 0.55,
+      F3: 0.62,
+      F4: 0.62,
+      C3: 0.48,
+      Cz: 0.5,
+      C4: 0.48,
+      P3: 0.35,
+      Pz: 0.32,
+      P4: 0.35,
+      O1: 0.25,
+      O2: 0.25,
+    };
+    const betaGainByChannel: Record<EEGChannel, number> = {
+      Fz: 1.0,
+      Fp1: 0.85,
+      Fp2: 0.85,
+      F3: 0.9,
+      F4: 0.9,
+      C3: 0.8,
+      Cz: 0.82,
+      C4: 0.8,
+      P3: 0.7,
+      Pz: 0.68,
+      P4: 0.7,
+      O1: 0.58,
+      O2: 0.58,
+    };
+
+    const theta = thetaBase * thetaGainByChannel[channel] * Math.sin(2 * Math.PI * 6 * t);
+    const beta = betaBase * betaGainByChannel[channel] * Math.sin(2 * Math.PI * 20 * t);
+    const alpha = alphaBase * 0.7 * Math.sin(2 * Math.PI * 10 * t);
+    const line = 2 * Math.sin(2 * Math.PI * 50 * t);
+    let sample = theta + beta + alpha + line + this._noise(3.5);
+
+    if (channel === "Fp1" || channel === "Fp2") {
+      if (this.blinkCountdown > 0) {
+        sample += 140 * Math.sin(2 * Math.PI * 1.8 * t);
+        this.blinkCountdown -= 1;
+      } else if (Math.random() < 0.003) {
+        this.blinkCountdown = 10;
+      }
     }
+
+    return sample;
   }
 
   /** Ruido blanco gaussiano aproximado (Box-Muller) */
@@ -234,15 +308,30 @@ class SessionDB {
 // Instancias del pipeline DSP (singleton por proceso)
 // ---------------------------------------------------------------------------
 
-const notch     = new NotchFilter(50, SAMPLE_RATE);          // elimina 50 Hz
-const bandpass  = new ButterworthBandpass(1, 40, SAMPLE_RATE); // pasa 1–40 Hz
-const window_   = new SlidingWindow(WINDOW_SIZE, HOP_SIZE);
+interface ChannelPipelineState {
+  notch: NotchFilter;
+  bandpass: ButterworthBandpass;
+  window: SlidingWindow;
+  hopBuffer: number[];
+  lastFiltered: number;
+}
+
+const channelPipelines = EEG_CHANNELS.reduce((acc, channel) => {
+  acc[channel] = {
+    notch: new NotchFilter(50, SAMPLE_RATE),
+    bandpass: new ButterworthBandpass(1, 40, SAMPLE_RATE),
+    window: new SlidingWindow(WINDOW_SIZE, HOP_SIZE),
+    hopBuffer: [],
+    lastFiltered: 0,
+  };
+  return acc;
+}, {} as Record<EEGChannel, ChannelPipelineState>);
+
 const fftAn     = new FFTAnalyzer(WINDOW_SIZE, SAMPLE_RATE);
 const bandPow   = new BandPowerExtractor(SAMPLE_RATE, WINDOW_SIZE);
-const zScore    = new RunningZScore(3);                      // ventana de 3 min
 
-// FeedbackEngine — se recrea con cada SessionConfig en start_session
-let feedbackEng = new FeedbackEngine();
+// ✅ NUEVO: Cliente ML para clasificación de estados
+const mlClient = new MLServiceClient("ws://localhost:8001/ws");
 
 // ---------------------------------------------------------------------------
 // Instancias de infraestructura
@@ -251,24 +340,50 @@ let feedbackEng = new FeedbackEngine();
 const simulator = new EEGSimulator();
 const db        = new SessionDB();
 
+/**
+ * Log de configuración al iniciar.
+ * Indica claramente si se usa simulador (desarrollo) o hardware real (producción).
+ */
+function logStartupConfig(): void {
+  console.log("╔════════════════════════════════════════════════════════╗");
+  console.log("║  NEUROFEEDBACK EEG SERVER — STARTUP CONFIG             ║");
+  console.log("╚════════════════════════════════════════════════════════╝");
+  console.log(`  Puerto:           ${PORT}`);
+  console.log(`  Sample Rate:      ${SAMPLE_RATE} Hz`);
+  console.log(`  Ventana FFT:      ${WINDOW_SIZE} samples (${(WINDOW_SIZE / SAMPLE_RATE * 1000).toFixed(0)} ms)`);
+  console.log(`  Hop Size:         ${HOP_SIZE} samples (~${(HOP_SIZE / SAMPLE_RATE * 1000).toFixed(0)} ms entre epochs)`);
+  console.log(`  Modo EEG:         ${EEG_MODE === "simulator" ? "🔷 SIMULADOR (desarrollo)" : "🔴 HARDWARE REAL (producción)"}`);
+  if (EEG_MODE === "simulator") {
+    console.log(`                    $ EEG_MODE=hardware node dist/server.js  ← para hardware real`);
+  }
+  console.log(`  Base de datos:    SessionDB (TODO: persistencia)`);
+  console.log("");
+}
+
 // ---------------------------------------------------------------------------
 // Estado global de la sesión
 // ---------------------------------------------------------------------------
 
 let currentSession : SessionState | null = null;
 let lastFilteredSample = 0;
+let inspectionChannel: EEGChannel = "Fz";
+let loadedDataset: DatasetMetadata | null = null;
 
 /**
  * Resetea todo el estado DSP para una nueva sesión.
  * Llamar al inicio de cada sesión para evitar contaminación de estadísticas.
  */
 function resetPipeline(config: SessionConfig): void {
-  notch.reset();
-  bandpass.reset();
-  window_.reset();
-  zScore.reset();
-  feedbackEng = new FeedbackEngine(config);
+  for (const channel of EEG_CHANNELS) {
+    const state = channelPipelines[channel];
+    state.notch.reset();
+    state.bandpass.reset();
+    state.window.reset();
+    state.hopBuffer.length = 0;
+    state.lastFiltered = 0;
+  }
   simulator.reset();
+  console.log("[Pipeline] Reset completado para nueva sesión");
 }
 
 // ---------------------------------------------------------------------------
@@ -333,46 +448,110 @@ function startLatencyLogger(): ReturnType<typeof setInterval> {
  *   Cualquier excepción en el pipeline se captura y loggea sin crashear el
  *   proceso — un error en un epoch no debe interrumpir la sesión del paciente.
  */
-function processSample(rawSample: number, wss: WebSocketServer): void {
+function clamp01(v: number): number {
+  if (!Number.isFinite(v)) return 0;
+  return Math.max(0, Math.min(1, v));
+}
+
+async function processSample(rawByChannel: ChannelSample, wss: WebSocketServer): Promise<void> {
   try {
-    // ── Etapa 1: Filtrado ──────────────────────────────────────────────
-    const afterNotch    = notch.process(rawSample);
-    const afterBandpass = bandpass.process(afterNotch);
-    lastFilteredSample  = afterBandpass;
+    // ── Etapa 1: Filtrado por canal ───────────────────────────────────
+    let epochReady = false;
+    for (const channel of EEG_CHANNELS) {
+      const state = channelPipelines[channel];
+      const afterNotch = state.notch.process(rawByChannel[channel]);
+      const afterBandpass = state.bandpass.process(afterNotch);
+      state.lastFiltered = afterBandpass;
+      state.hopBuffer.push(afterBandpass);
 
-    // ── Etapa 2: Buffer deslizante ────────────────────────────────────
-    const epochReady = window_.push(afterBandpass);
-    if (!epochReady) return; // aún no hay suficientes muestras
+      const ready = state.window.push(afterBandpass);
+      if (channel === "Fz") epochReady = ready;
+    }
 
-    // ── Etapa 3: Análisis espectral (solo cuando hay epoch completo) ──
+    lastFilteredSample = channelPipelines.Fz.lastFiltered;
+    if (!epochReady) return;
+
+    // ── Etapa 2: Análisis espectral (solo cuando hay epoch completo) ──
     const t0 = Date.now();
 
-    const rawWindow    = window_.getWindow();
-    const hannWindow   = window_.applyHannWindow(rawWindow);
-    const magnitudes   = fftAn.analyze(hannWindow);
-    const bands        = bandPow.extract(magnitudes);
-    const thetaBeta    = bandPow.computeThetaBetaRatio(bands);
+    const bandsByChannel: Record<EEGChannel, BandPowers> = {} as Record<EEGChannel, BandPowers>;
+    const magnitudesByChannel: Record<EEGChannel, Float32Array> = {} as Record<EEGChannel, Float32Array>;
+    const multiChannelWindow: number[][] = [];
 
-    // ── Etapa 4: Normalización adaptativa ────────────────────────────
-    const zResult      = zScore.push(thetaBeta.ratio);
+    for (const channel of EEG_CHANNELS) {
+      const state = channelPipelines[channel];
+      const rawWindow  = state.window.getWindow();
+      const hannWindow = state.window.applyHannWindow(rawWindow);
+      const magnitudes = fftAn.analyze(hannWindow);
+      magnitudesByChannel[channel] = magnitudes;
+      bandsByChannel[channel] = bandPow.extract(magnitudes);
+      multiChannelWindow.push(Array.from(rawWindow));
+    }
 
-    // ── Etapa 5: Motor de feedback ────────────────────────────────────
-    // No enviar comandos hasta que el z-score tenga suficientes muestras
-    // para ser estadísticamente significativo (Welford n ≥ 30).
-    const command = feedbackEng.computeCommand(zResult, thetaBeta);
+    const fzBands = bandsByChannel.Fz;
+    const thetaBeta = bandPow.computeThetaBetaRatio(fzBands);
+
+    const thetaFz = fzBands.theta;
+    const thetaLateral = (bandsByChannel.F3.theta + bandsByChannel.F4.theta) / 2;
+    const frontalSpecificity = thetaFz / Math.max(thetaLateral, 1e-12);
+    const frontalThreshold = currentSession?.config?.frontalSpecificityThreshold ?? DEFAULT_FRONTAL_SPECIFICITY_THRESHOLD;
+    const frontalSpecificityValid = frontalSpecificity >= frontalThreshold;
+
+    const fp1Peak = Math.max(...channelPipelines.Fp1.hopBuffer.map(v => Math.abs(v)), 0);
+    const fp2Peak = Math.max(...channelPipelines.Fp2.hopBuffer.map(v => Math.abs(v)), 0);
+    const artifactDetected = fp1Peak > ARTIFACT_THRESHOLD_UV || fp2Peak > ARTIFACT_THRESHOLD_UV;
+
+    const thetaPeaks = EEG_CHANNELS.map((channel) => bandsByChannel[channel].theta);
+    const thetaMax = Math.max(...thetaPeaks, 1e-12);
+    const topographyTheta = Object.fromEntries(
+      EEG_CHANNELS.map((channel) => [channel, clamp01(bandsByChannel[channel].theta / thetaMax)])
+    ) as Record<EEGChannel, number>;
+
+    // ── Etapa 3: Clasificación via ML Service ────────────────────────
+    // ✅ NUEVO: Llamar al clasificador (retorna null si el servicio no está disponible)
+    const mlResult = await mlClient.processWindow({
+      eeg_window: multiChannelWindow as number[][],
+      band_powers_per_channel: Object.fromEntries(
+        EEG_CHANNELS.map(ch => [ch, bandsByChannel[ch]])
+      ) as Record<EEGChannel, BandPowers>,
+      frontal_specificity: frontalSpecificity,
+    });
 
     const pipelineMs = Date.now() - t0;
     recordLatency(pipelineMs);
 
-    // ── Etapa 6: Broadcast al frontend ───────────────────────────────
+    // ── Etapa 4: Broadcast al frontend ───────────────────────────────
+    // Capturar y vaciar el hop buffer acumulado (64 muestras) para que el
+    // osciloscopio del frontend dibuje a 250 sps reales en vez de 4 sps.
+    const hopSamples = channelPipelines.Fz.hopBuffer.splice(0);
+    const inspectionHopSamples = channelPipelines[inspectionChannel].hopBuffer.splice(0);
+    const inspectionMagnitudes = Array.from(magnitudesByChannel[inspectionChannel]).slice(0, 96);
+    for (const channel of EEG_CHANNELS) {
+      if (channel !== "Fz" && channel !== inspectionChannel) {
+        channelPipelines[channel].hopBuffer.length = 0;
+      }
+    }
+
     const payload: FeedbackPayload = {
-      type           : "eeg_data",
-      timestamp      : Date.now(),
-      filteredSample : lastFilteredSample,
-      bandPowers     : bands,
+      type            : "eeg_data",
+      timestamp       : Date.now(),
+      filteredSample  : lastFilteredSample,
+      filteredSamples : hopSamples,
+      frontalSpecificity,
+      frontalSpecificityValid,
+      artifactDetected,
+      topographyTheta,
+      inspection: {
+        channel: inspectionChannel,
+        filteredSamples: inspectionHopSamples,
+        fftMagnitudes: inspectionMagnitudes,
+        bandPowers: bandsByChannel[inspectionChannel],
+      },
+      bandPowers      : fzBands,
       thetaBeta,
-      zScore         : zResult,
-      command,
+      // ✅ NUEVO: Predicción de estado del clasificador
+      state_prediction: mlResult?.classifier_prediction ?? null,
+      connectivity    : mlResult ?? null,
       pipelineMs,
     };
 
@@ -489,6 +668,44 @@ function handleMessage(ws: WebSocket, wss: WebSocketServer, raw: string): void {
       break;
     }
 
+    // ── set_inspection_channel ──────────────────────────────────────────
+    case "set_inspection_channel": {
+      const { channel } = (msg as { type: "set_inspection_channel"; payload: { channel: EEGChannel } }).payload;
+
+      if (!EEG_CHANNELS.includes(channel)) {
+        send(ws, { type: "error", message: `Canal de inspección inválido: ${channel}` });
+        return;
+      }
+
+      inspectionChannel = channel;
+      send(ws, { type: "inspection_channel_set", channel });
+      console.log(`[Session] Inspection channel: ${channel}`);
+      break;
+    }
+
+    // ── load_dataset ───────────────────────────────────────────────────
+    case "load_dataset": {
+      const datasetPath = (msg as { type: "load_dataset"; payload: { path: string } }).payload?.path;
+      if (!datasetPath || typeof datasetPath !== "string") {
+        send(ws, { type: "error", message: "load_dataset: falta path" });
+        return;
+      }
+
+      parseDatasetMetadata(datasetPath)
+        .then((meta) => {
+          loadedDataset = meta;
+          send(ws, { type: "dataset_loaded", dataset: meta });
+          console.log(
+            `[Dataset] loaded ${meta.format.toUpperCase()} ` +
+            `${meta.channels.length}ch ${meta.sampleRate}Hz ${meta.durationSec.toFixed(1)}s`
+          );
+        })
+        .catch((err: Error) => {
+          send(ws, { type: "error", message: `load_dataset: ${err.message}` });
+        });
+      break;
+    }
+
     // ── ping ─────────────────────────────────────────────────────────────
     case "ping": {
       send(ws, { type: "pong", timestamp: Date.now() });
@@ -557,6 +774,10 @@ function createHttpServer(): http.Server {
 function main(): void {
   const httpServer = createHttpServer();
 
+  // ✅ NUEVO: Conectar al servicio ML
+  mlClient.connect();
+  console.log("[ML-Client] Iniciando conexión con ML Service en ws://localhost:8001/ws");
+
   // ── WebSocket Server ───────────────────────────────────────────────────
   const wss = new WebSocketServer({ server: httpServer });
 
@@ -571,6 +792,7 @@ function main(): void {
       sampleRate: SAMPLE_RATE,
       windowSize: WINDOW_SIZE,
       hopSize   : HOP_SIZE,
+      dataset   : loadedDataset,
       session   : currentSession
         ? { id: currentSession.id, tranceMode: currentSession.tranceMode }
         : null,
@@ -602,13 +824,9 @@ function main(): void {
 
   // ── Arrancar servidor HTTP ────────────────────────────────────────────
   httpServer.listen(PORT, () => {
-    console.log("╔══════════════════════════════════════════════════════╗");
-    console.log("║         EEG Neurofeedback Server  v1.0.0             ║");
-    console.log("╠══════════════════════════════════════════════════════╣");
-    console.log(`║  WebSocket  ws://localhost:${PORT}                    ║`);
-    console.log(`║  Health     http://localhost:${PORT}/health            ║`);
-    console.log(`║  Pipeline   ${SAMPLE_RATE} sps | win=${WINDOW_SIZE} | hop=${HOP_SIZE}          ║`);
-    console.log("╚══════════════════════════════════════════════════════╝");
+    logStartupConfig();
+    console.log("  ✅ Servidor activo — aceptando conexiones WS y HTTP");
+    console.log("");
   });
 
   // ── Graceful shutdown ─────────────────────────────────────────────────

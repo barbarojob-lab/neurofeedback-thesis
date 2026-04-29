@@ -34,24 +34,32 @@ import React, {
 
 import WaveformChart    from "./components/WaveformChart";
 import ThetaBetaGauge   from "./components/ThetaBetaGauge";
-import TranceDepth      from "./components/TranceDepth";
 import BandPowerBars    from "./components/BandPowerBars";
+import TopographyMap    from "./components/TopographyMap";
+import ChannelInspectionPanel from "./components/ChannelInspectionPanel";
+// ✅ NUEVOS: Componentes del clasificador
+import StateClassifier  from "./components/StateClassifier";
+import ConfidenceGauge  from "./components/ConfidenceGauge";
+import ProbabilityMatrix from "./components/ProbabilityMatrix";
 import { useEEGSocket } from "./hooks/useEEGSocket";
 import {
   useEEGStore,
-  selectCommand,
   selectPipelineMs,
-  selectZScore,
   selectLastError,
+  selectFrontalSpecificity,
+  selectFrontalSpecificityValid,
+  selectArtifactDetected,
+  selectStatePrediction,
 } from "./store/eegStore";
 
-import type { SessionConfig } from "./types";
+import type { SessionConfig, DatasetMetadata } from "./types";
 
 // ---------------------------------------------------------------------------
 // Constantes
 // ---------------------------------------------------------------------------
 
 const SAMPLE_RATE = 250;
+const EEG_CHANNEL_OPTIONS = ["Fz", "Fp1", "Fp2", "F3", "F4", "C3", "Cz", "C4", "P3", "Pz", "P4", "O1", "O2"];
 
 // ---------------------------------------------------------------------------
 // Sub-componentes de UI local
@@ -94,48 +102,73 @@ function ConnectionDot({
   );
 }
 
-/** Badge de comando de feedback actual */
-function CommandBadge() {
-  const command = useEEGStore(selectCommand);
-  if (!command) return null;
+/** Badge dinámico de estado predicho (reemplaza CommandBadge) */
+function StatePredictionBadge() {
+  const prediction = useEEGStore(selectStatePrediction);
+  
+  if (!prediction) {
+    return (
+      <div style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "4px 12px",
+        borderRadius: 4,
+        background: "rgba(96,125,139,0.15)",
+        border: "1px solid rgba(144,164,174,0.33)",
+      }}>
+        <span style={{
+          fontSize: 10,
+          fontFamily: "'JetBrains Mono', monospace",
+          color: "#90a4ae",
+          letterSpacing: "0.1em",
+          fontWeight: 600,
+        }}>
+          ⏳ WAITING FOR PREDICTION
+        </span>
+      </div>
+    );
+  }
 
-  const styles: Record<string, { bg: string; color: string; label: string }> = {
-    decrease_theta : { bg: "rgba(255,23,68,0.15)",  color: "#ff5252", label: "↓ REDUCIR THETA" },
-    neutral        : { bg: "rgba(96,125,139,0.15)", color: "#90a4ae", label: "◆ NEUTRO"         },
-    increase_theta : { bg: "rgba(0,230,118,0.15)",  color: "#00e676", label: "↑ AUMENTAR THETA" },
-    sustain_trance : { bg: "rgba(0,229,255,0.15)",  color: "#00e5ff", label: "◈ MANTENER TRANCE"},
+  const stateColors: Record<string, string> = {
+    awake: "#ff5252",
+    induction: "#ffc400",
+    trance: "#00e676",
   };
-  const s = styles[command.action] ?? styles.neutral;
+
+  const label = prediction.predicted_label.toUpperCase();
+  const color = stateColors[prediction.predicted_label] ?? "#90a4ae";
 
   return (
     <div style={{
-      display      : "flex",
-      alignItems   : "center",
-      gap          : 8,
-      padding      : "4px 12px",
-      borderRadius : 4,
-      background   : s.bg,
-      border       : `1px solid ${s.color}33`,
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      padding: "4px 12px",
+      borderRadius: 4,
+      background: `${color}15`,
+      border: `1px solid ${color}33`,
     }}>
       <span style={{
-        fontSize     : 10,
-        fontFamily   : "'JetBrains Mono', monospace",
-        color        : s.color,
+        fontSize: 10,
+        fontFamily: "'JetBrains Mono', monospace",
+        color: color,
         letterSpacing: "0.1em",
-        fontWeight   : 600,
+        fontWeight: 600,
       }}>
-        {s.label}
+        {label}
       </span>
       <span style={{
-        fontSize : 10,
-        color    : "rgba(255,255,255,0.3)",
+        fontSize: 10,
+        color: "rgba(255,255,255,0.3)",
         fontFamily: "'JetBrains Mono', monospace",
       }}>
-        {(command.intensity * 100).toFixed(0)}%
+        {(prediction.confidence * 100).toFixed(0)}%
       </span>
     </div>
   );
 }
+
 
 /** Indicador de latencia del pipeline */
 function PipelineLatency() {
@@ -166,6 +199,10 @@ interface ControlPanelProps {
   onTranceToggle    : (enabled: boolean) => void;
   onSubmitNRS       : (sessionId: string, value: number) => void;
   onPing            : () => void;
+  inspectionChannel : string;
+  onInspectionChannelChange: (channel: string) => void;
+  onLoadDataset: (path: string) => void;
+  dataset: DatasetMetadata | null;
 }
 
 function ControlPanel({
@@ -177,12 +214,17 @@ function ControlPanel({
   onTranceToggle,
   onSubmitNRS,
   onPing,
+  inspectionChannel,
+  onInspectionChannelChange,
+  onLoadDataset,
+  dataset,
 }: ControlPanelProps) {
   const [patientId,    setPatientId]    = useState("");
   const [group,        setGroup]        = useState<"experimental" | "control">("experimental");
   const [tranceMode,   setTranceModeLocal] = useState(false);
   const [sigmoidK,     setSigmoidK]     = useState(2.0);
   const [thetaThresh,  setThetaThresh]  = useState(0.0);
+  const [datasetPath, setDatasetPath] = useState("");
 
   const patientIdId = useId();
   const groupId     = useId();
@@ -324,6 +366,69 @@ function ControlPanel({
         </div>
       )}
 
+      {field("CANAL INSPECCION",
+        <select
+          value={inspectionChannel}
+          onChange={(e) => onInspectionChannelChange(e.target.value)}
+          style={inputStyle}
+        >
+          {EEG_CHANNEL_OPTIONS.map((ch) => (
+            <option key={ch} value={ch}>{ch}</option>
+          ))}
+        </select>
+      )}
+
+      {field("DATASET (ruta local)",
+        <div style={{ display: "grid", gap: 6 }}>
+          <input
+            type="text"
+            value={datasetPath}
+            onChange={(e) => setDatasetPath(e.target.value)}
+            placeholder="D:/datasets/eeg/sesion01.edf"
+            style={inputStyle}
+          />
+          <button
+            onClick={() => onLoadDataset(datasetPath.trim())}
+            disabled={!datasetPath.trim() || !isConnected}
+            style={{
+              width: "100%",
+              padding: "6px 0",
+              borderRadius: 5,
+              border: "none",
+              cursor: !datasetPath.trim() || !isConnected ? "not-allowed" : "pointer",
+              backgroundColor: "rgba(0,229,255,0.12)",
+              color: "#00e5ff",
+              fontFamily: "'JetBrains Mono', monospace",
+              fontSize: 10,
+              letterSpacing: "0.08em",
+              outline: "1px solid rgba(0,229,255,0.25)",
+            } as React.CSSProperties}
+          >
+            CARGAR DATASET
+          </button>
+        </div>
+      )}
+
+      {dataset && (
+        <div style={{
+          padding: "8px 10px",
+          borderRadius: 6,
+          marginBottom: 10,
+          background: "rgba(0,229,255,0.06)",
+          border: "1px solid rgba(0,229,255,0.18)",
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 9,
+          color: "rgba(255,255,255,0.75)",
+          display: "grid",
+          gap: 3,
+        }}>
+          <div>FMT: {dataset.format.toUpperCase()}</div>
+          <div>CH: {dataset.channels.length}</div>
+          <div>FS: {dataset.sampleRate} Hz</div>
+          <div>DUR: {dataset.durationSec.toFixed(1)} s</div>
+        </div>
+      )}
+
       {/* Botón principal: Iniciar / Detener */}
       <button
         onClick={isSessionActive ? onStop : handleStart}
@@ -342,7 +447,7 @@ function ControlPanel({
           color          : isSessionActive
             ? "#ff5252"
             : isConnected ? "#00e5ff" : "rgba(255,255,255,0.3)",
-          border_color   : isSessionActive ? "#ff524244" : "#00e5ff44",
+          // border_color: isSessionActive ? "#ff524244" : "#00e5ff44", // removed invalid prop
           fontFamily     : "'JetBrains Mono', monospace",
           fontSize       : 12,
           fontWeight     : 700,
@@ -350,9 +455,8 @@ function ControlPanel({
           transition     : "all 0.2s",
           marginTop      : 4,
           outline        : "1px solid",
-          outlineColor   : isSessionActive
-            ? "rgba(255,82,82,0.35)"
-            : isConnected ? "rgba(0,229,255,0.3)" : "rgba(255,255,255,0.1)",
+          borderColor: isSessionActive ? "rgba(255,82,82,0.35)" : "rgba(0,229,255,0.3)",
+
         } as React.CSSProperties}
       >
         {isSessionActive ? "■  DETENER SESIÓN" : "▶  INICIAR SESIÓN"}
@@ -464,42 +568,106 @@ function ControlPanel({
       )}
 
       {/* z-score rápido */}
-      <ZScoreWidget />
+      {/* REMOVIDO: ZScoreWidget (reemplazado por State Classification) */}
     </div>
   );
 }
 
-/** Widget compacto del z-score actual para el panel de control */
-function ZScoreWidget() {
-  const z = useEEGStore(selectZScore);
-  const color = z > 1 ? "#00e676" : z > 0 ? "#00e5ff" : z > -1 ? "#90a4ae" : "#ff5252";
+function ValidationPanel() {
+  const frontalSpecificity = useEEGStore(selectFrontalSpecificity);
+  const frontalValid = useEEGStore(selectFrontalSpecificityValid);
+  const artifact = useEEGStore(selectArtifactDetected);
+
+  const cellStyle: React.CSSProperties = {
+    padding: "8px 10px",
+    borderRadius: 6,
+    border: "1px solid rgba(255,255,255,0.12)",
+    fontFamily: "'JetBrains Mono', monospace",
+    fontSize: 10,
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 10,
+  };
 
   return (
-    <div style={{
-      marginTop   : 10,
-      textAlign   : "center",
-      padding     : "8px 0",
-      borderTop   : "1px solid rgba(255,255,255,0.06)",
-    }}>
+    <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
       <div style={{
-        fontSize : 8,
+        fontSize: 9,
         fontFamily: "'JetBrains Mono', monospace",
-        color    : "rgba(255,255,255,0.25)",
-        letterSpacing: "0.1em",
-        marginBottom: 4,
+        letterSpacing: "0.12em",
+        color: "rgba(255,255,255,0.3)",
       }}>
-        Z-SCORE ACTUAL
+        VALIDACION DE SEGMENTO
       </div>
+
       <div style={{
-        fontSize   : 22,
-        fontFamily : "'JetBrains Mono', monospace",
-        fontWeight : 700,
-        color,
-        transition : "color 0.3s",
+        ...cellStyle,
+        background: frontalValid ? "rgba(0,230,118,0.1)" : "rgba(255,82,82,0.1)",
+        borderColor: frontalValid ? "rgba(0,230,118,0.25)" : "rgba(255,82,82,0.25)",
       }}>
-        {z >= 0 ? "+" : ""}{z.toFixed(2)}σ
+        <span>Especificidad frontal</span>
+        <span style={{ color: frontalValid ? "#00e676" : "#ff5252" }}>
+          {frontalValid ? "VALIDA" : "INVALIDA"}
+        </span>
+      </div>
+
+      <div style={{
+        ...cellStyle,
+        background: artifact ? "rgba(255,82,82,0.1)" : "rgba(0,229,255,0.1)",
+        borderColor: artifact ? "rgba(255,82,82,0.25)" : "rgba(0,229,255,0.25)",
+      }}>
+        <span>Artefacto ocular</span>
+        <span style={{ color: artifact ? "#ff5252" : "#00e5ff" }}>
+          {artifact ? "CONTAMINADO" : "LIMPIO"}
+        </span>
+      </div>
+
+      <div style={{
+        ...cellStyle,
+        background: "rgba(255,255,255,0.03)",
+        borderColor: "rgba(255,255,255,0.1)",
+      }}>
+        <span>Fz / media(F3,F4)</span>
+        <span style={{ color: "#ffd600" }}>{frontalSpecificity.toFixed(2)}</span>
       </div>
     </div>
+  );
+}
+
+// ========== Panels para los nuevos componentes del clasificador ==========
+
+function StateClassifierPanel() {
+  const prediction = useEEGStore(selectStatePrediction);
+  
+  return (
+    <StateClassifier
+      label={prediction?.predicted_label ?? null}
+      confidence={prediction?.confidence ?? 0}
+      timestamp={prediction ? Date.now() : undefined}
+    />
+  );
+}
+
+function ConfidenceGaugePanel() {
+  const prediction = useEEGStore(selectStatePrediction);
+  
+  return (
+    <ConfidenceGauge
+      confidence={prediction?.confidence ?? 0}
+    />
+  );
+}
+
+function ProbabilityMatrixPanel() {
+  const prediction = useEEGStore(selectStatePrediction);
+  
+  return (
+    <ProbabilityMatrix
+      awake={prediction?.class_probabilities.awake ?? 0}
+      induction={prediction?.class_probabilities.induction ?? 0}
+      trance={prediction?.class_probabilities.trance ?? 0}
+    />
   );
 }
 
@@ -517,10 +685,14 @@ export default function App() {
     stopSession,
     setTranceMode,
     submitSubjective,
+    setInspectionChannel,
+    loadDataset,
+    dataset,
   } = useEEGSocket();
 
   const lastError = useEEGStore(selectLastError);
-  const { sessionId } = useEEGStore(s => ({ sessionId: s.sessionId }));
+  const sessionId = useEEGStore((s) => s.sessionId);
+  const inspectionChannel = useEEGStore((s) => s.inspectionChannel);
 
   return (
     <div style={{
@@ -599,8 +771,8 @@ export default function App() {
           </div>
         </div>
 
-        {/* Centro: comando activo */}
-        <CommandBadge />
+        {/* Centro: predicción de estado */}
+        <StatePredictionBadge />
 
         {/* Derecha: conexión + latencia */}
         <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
@@ -619,55 +791,88 @@ export default function App() {
         <WaveformChart sampleRate={SAMPLE_RATE} height={200} />
       </section>
 
-      {/* ── FILA INFERIOR: 4 paneles ─────────────────────────────────────── */}
+      <ChannelInspectionPanel />
+
+      {/* ── FILA INFERIOR: Clasificador + Visualizaciones ──────────────────── */}
       <div style={{
         display             : "grid",
-        gridTemplateColumns : "220px 130px 1fr 220px",
+        gridTemplateColumns : "180px 180px 200px 1fr 260px",
         gap                 : 12,
         flex                : 1,
         minHeight           : 0,
       }}>
 
-        {/* Panel 1 — ThetaBeta Gauge */}
+        {/* Panel 1 — State Classifier */}
         <section style={{
           backgroundColor: "#0d0d1a",
           borderRadius   : 8,
           border         : "1px solid rgba(255,255,255,0.07)",
-          padding        : "16px 12px",
+          padding        : "12px",
           display        : "flex",
           alignItems     : "center",
           justifyContent : "center",
         }}>
-          <ThetaBetaGauge />
+          <StateClassifierPanel />
         </section>
 
-        {/* Panel 2 — Trance Depth */}
+        {/* Panel 2 — Confidence Gauge */}
         <section style={{
           backgroundColor: "#0d0d1a",
           borderRadius   : 8,
           border         : "1px solid rgba(255,255,255,0.07)",
-          padding        : "14px 8px",
+          padding        : "12px",
           display        : "flex",
           alignItems     : "center",
           justifyContent : "center",
         }}>
-          <TranceDepth />
+          <ConfidenceGaugePanel />
         </section>
 
-        {/* Panel 3 — Band Power Bars */}
+        {/* Panel 3 — Probability Matrix */}
         <section style={{
           backgroundColor: "#0d0d1a",
           borderRadius   : 8,
           border         : "1px solid rgba(255,255,255,0.07)",
-          padding        : "16px 18px",
+          padding        : "12px",
           display        : "flex",
-          flexDirection  : "column",
+          alignItems     : "center",
           justifyContent : "center",
         }}>
-          <BandPowerBars />
+          <ProbabilityMatrixPanel />
         </section>
 
-        {/* Panel 4 — Control */}
+        {/* Panel 4 — Band Power + ThetaBeta */}
+        <div style={{
+          display: "grid",
+          gridTemplateRows: "1fr 1fr",
+          gap: 12,
+        }}>
+          <section style={{
+            backgroundColor: "#0d0d1a",
+            borderRadius   : 8,
+            border         : "1px solid rgba(255,255,255,0.07)",
+            padding        : "16px 18px",
+            display        : "flex",
+            flexDirection  : "column",
+            justifyContent : "center",
+          }}>
+            <BandPowerBars />
+          </section>
+
+          <section style={{
+            backgroundColor: "#0d0d1a",
+            borderRadius   : 8,
+            border         : "1px solid rgba(255,255,255,0.07)",
+            padding        : "16px 12px",
+            display        : "flex",
+            alignItems     : "center",
+            justifyContent : "center",
+          }}>
+            <ThetaBetaGauge />
+          </section>
+        </div>
+
+        {/* Panel 5 — Control + Topography */}
         <section style={{ minHeight: 0 }}>
           <ControlPanel
             isConnected={isConnected}
@@ -686,6 +891,10 @@ export default function App() {
               })
             }
             onPing={() => sendMessage({ type: "ping" })}
+            inspectionChannel={inspectionChannel}
+            onInspectionChannelChange={setInspectionChannel}
+            onLoadDataset={loadDataset}
+            dataset={dataset}
           />
         </section>
       </div>

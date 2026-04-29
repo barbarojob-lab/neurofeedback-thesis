@@ -24,7 +24,7 @@
  *   altura_activa(z) = ((z + 3) / 6) × HEIGHT_BAR   (desde abajo)
  */
 
-import React, { memo, useMemo } from "react";
+import { memo, useMemo } from "react";
 import { useEEGStore, selectZScore } from "../store/eegStore";
 
 // ---------------------------------------------------------------------------

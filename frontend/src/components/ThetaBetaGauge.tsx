@@ -33,7 +33,7 @@
  *   Por encima de 2.0 el paciente puede estar demasiado próximo al sueño.
  */
 
-import React, { memo, useMemo } from "react";
+import { memo, useMemo } from "react";
 import { useEEGStore, selectThetaBetaRatio } from "../store/eegStore";
 
 // ---------------------------------------------------------------------------

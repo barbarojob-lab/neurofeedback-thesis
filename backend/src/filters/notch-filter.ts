@@ -273,7 +273,6 @@ export function testNotchFilter(): void {
   console.log("═══════════════════════════════════════════════════════");
 }
 
-// ---------------------------------------------------------------------------
-// Entry point (ejecutar directamente con ts-node o tras compilar)
-// ---------------------------------------------------------------------------
-testNotchFilter();
+// Note: Invoke testNotchFilter() explicitly only for testing,
+// not automatically on import to avoid polluting server startup logs
+// testNotchFilter();

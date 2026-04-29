@@ -65,7 +65,7 @@
  *   que el sample rate es constante — válido para hardware EEG.
  */
 
-import React, {
+import {
   useEffect,
   useRef,
   useCallback,
@@ -76,7 +76,6 @@ import "uplot/dist/uPlot.min.css";
 
 import {
   useEEGStore,
-  selectWaveformIndex,
 } from "../store/eegStore";
 
 // ---------------------------------------------------------------------------
@@ -86,6 +85,7 @@ import {
 const BUFFER_SIZE   = 500;   // debe coincidir con WAVEFORM_BUFFER_SIZE en eegStore
 const Y_MIN         = -150;  // µV — rango fijo para EEG clínico
 const Y_MAX         = +150;  // µV
+const Y_MAX_DYNAMIC = 3000;  // límite superior de autoescala para evitar zoom extremo por artefactos
 const SIGNAL_COLOR  = "#00e5ff"; // cyan eléctrico — contraste máximo sobre fondo oscuro
 const BG_COLOR      = "#0a0a0f"; // negro casi absoluto — estilo osciloscopio
 const GRID_COLOR    = "rgba(255,255,255,0.07)"; // gridlines apenas perceptibles
@@ -156,6 +156,17 @@ function unrollCircularBuffer(
   }
 }
 
+function getPeakAbs(values: Float32Array): number {
+  let peak = 0;
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i]!;
+    if (!Number.isFinite(v)) continue;
+    const abs = Math.abs(v);
+    if (abs > peak) peak = abs;
+  }
+  return peak;
+}
+
 // ---------------------------------------------------------------------------
 // Configuración estática de uPlot
 // ---------------------------------------------------------------------------
@@ -166,8 +177,7 @@ function unrollCircularBuffer(
  */
 function buildUPlotOptions(
   width: number,
-  height: number,
-  sampleRate: number
+  height: number
 ): uPlot.Options {
   return {
     title  : "EEG — Canal 1 (µV)",
@@ -190,18 +200,10 @@ function buildUPlotOptions(
     },
 
     // Deshabilitar selección de rango (zooming) — el eje X se mueve solo
-    select: { show: false },
+    select: { show: false, left: 0, top: 0, width: 0, height: 0 },
 
     legend: {
       show: true,
-      // Formato del valor en el tooltip del cursor
-      values: [
-        {},  // columna de timestamps — vacía
-        {
-          value: (_u: uPlot, v: number) =>
-            v == null ? "--" : `${v.toFixed(1)} µV`,
-        },
-      ],
     },
 
     axes: [
@@ -296,21 +298,12 @@ const WaveformChart = memo(function WaveformChart({
   const uplotRef      = useRef<uPlot | null>(null);
   const rafIdRef      = useRef<number>(0);
   const ledTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const chartFaultRef = useRef<boolean>(false);
 
   // Arrays pre-allocados para el loop RAF — sin allocaciones en el hot path
   const tsArrayRef    = useRef<Float64Array>(new Float64Array(BUFFER_SIZE));
   const plotValRef    = useRef<Float32Array>(new Float32Array(BUFFER_SIZE));
-
-  // ── Selector atómico: solo el índice circular (no el buffer completo) ──
-  // El índice cambia con cada sample; el buffer muta in-place sin cambiar
-  // su referencia. Esta es la señal de "hay datos nuevos".
-  const waveformIndex = useEEGStore(selectWaveformIndex);
-
-  // ── Ref para el índice: accesible en el loop RAF sin closure stale ─────
-  const waveformIndexRef = useRef<number>(waveformIndex);
-  useEffect(() => {
-    waveformIndexRef.current = waveformIndex;
-  }, [waveformIndex]);
+  const yRangeRef     = useRef<number>(Math.max(Math.abs(Y_MIN), Math.abs(Y_MAX)));
 
   // ── Función de parpadeo del LED (actualiza DOM directamente, sin setState) ─
   const blinkLED = useCallback(() => {
@@ -338,14 +331,16 @@ const WaveformChart = memo(function WaveformChart({
 
     function frame() {
       rafIdRef.current = requestAnimationFrame(frame);
+      if (chartFaultRef.current) return;
 
       const plot = uplotRef.current;
       if (!plot) return;
 
-      // Leer el buffer directamente desde el store sin suscripción reactiva.
+      // Leer el buffer y el índice directamente desde el store en hot path (sin suscripciones).
       // getState() es síncrono y no causa re-render.
-      const { waveformBuffer } = useEEGStore.getState();
-      const currentIndex = waveformIndexRef.current;
+      const state = useEEGStore.getState();
+      const { waveformBuffer } = state;
+      const currentIndex = state.waveformIndex;
 
       // Skip si no hay datos nuevos desde el último frame
       // (e.g., sesión pausada, pestaña en background antes de que RAF se pause)
@@ -359,17 +354,45 @@ const WaveformChart = memo(function WaveformChart({
       const nowSec = Date.now() / 1000;
       fillTimestamps(nowSec, BUFFER_SIZE, sampleRate, tsArrayRef.current);
 
+      // ── Autoescala vertical adaptativa ───────────────────────────────
+      // Mantiene un mínimo clínico ±150 µV, pero amplía cuando la señal
+      // supera ese rango para evitar que la línea desaparezca.
+      const peakAbs = getPeakAbs(plotValRef.current);
+      const targetRange = Math.min(
+        Math.max(peakAbs * 1.25, Math.abs(Y_MAX)),
+        Y_MAX_DYNAMIC
+      );
+      const prevRange = yRangeRef.current;
+      const nextRange = prevRange + (targetRange - prevRange) * 0.2;
+
+      if (Math.abs(nextRange - prevRange) > 2) {
+        yRangeRef.current = nextRange;
+        try {
+          plot.setScale("y", { min: -nextRange, max: nextRange });
+        } catch (err) {
+          chartFaultRef.current = true;
+          console.error("[WaveformChart] setScale falló", err);
+          return;
+        }
+      }
+
       // ── Actualizar uPlot sin re-crear la instancia ──────────────────
       // setData es la API de uPlot para actualizar datos sin destruir/recrear.
       // uPlot internamente solo redibuja la región del canvas que cambió.
       // El segundo argumento (resetScales=false) mantiene los rangos fijos.
-      plot.setData(
-        [
-          tsArrayRef.current as unknown as number[],
-          plotValRef.current as unknown as number[],
-        ],
-        false // no resetear scales — preservar el rango Y fijo
-      );
+      try {
+        plot.setData(
+          [
+            tsArrayRef.current as unknown as number[],
+            plotValRef.current as unknown as number[],
+          ],
+          false // no resetear scales — preservar el rango Y fijo
+        );
+      } catch (err) {
+        chartFaultRef.current = true;
+        console.error("[WaveformChart] setData falló; se detiene el loop para evitar crash", err);
+        return;
+      }
 
       // Parpadear el LED para indicar actividad (DOM directo, sin setState)
       blinkLED();
@@ -383,6 +406,12 @@ const WaveformChart = memo(function WaveformChart({
     const container = containerRef.current;
     if (!container) return;
 
+    // CRUCIAL: limpiar el contenedor antes de crear uPlot para evitar
+    // conflictos con elementos React que React intenta manipular
+    while (container.firstChild) {
+      container.removeChild(container.firstChild);
+    }
+
     // Calcular ancho real del contenedor si no se pasa como prop
     const resolvedWidth = (width ?? container.offsetWidth) || 800;
 
@@ -393,11 +422,17 @@ const WaveformChart = memo(function WaveformChart({
     );
     const initVal = new Array<number>(BUFFER_SIZE).fill(0);
 
-    const opts = buildUPlotOptions(resolvedWidth, height, sampleRate);
+    const opts = buildUPlotOptions(resolvedWidth, height);
 
     // uPlot espera arrays nativos JS (no TypedArrays) en el constructor.
     // En setData se pueden pasar TypedArrays — de ahí el cast en el loop RAF.
-    uplotRef.current = new uPlot(opts, [initTs, initVal], container);
+    try {
+      uplotRef.current = new uPlot(opts, [initTs, initVal], container);
+    } catch (err) {
+      chartFaultRef.current = true;
+      console.error("[WaveformChart] Error inicializando uPlot", err);
+      return;
+    }
 
     // Arrancar el loop RAF
     startRAFLoop();
@@ -417,15 +452,31 @@ const WaveformChart = memo(function WaveformChart({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // ← Sin dependencias: el efecto corre solo al montar/desmontar
 
-  // ── Efecto de resize: recrear uPlot si cambia width o height ──────────
   useEffect(() => {
-    const plot = uplotRef.current;
     const container = containerRef.current;
-    if (!plot || !container) return;
+    if (!container) return;
+    
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry || !uplotRef.current) return;
+      const nextWidth = Math.floor(entry.contentRect.width);
+      if (nextWidth <= 0 || height <= 0) return;
 
-    const resolvedWidth = (width ?? container.offsetWidth) || 800;
-    plot.setSize({ width: resolvedWidth, height });
-  }, [width, height]);
+      try {
+        uplotRef.current.setSize({
+          width: nextWidth,
+          height,
+        });
+      } catch (err) {
+        chartFaultRef.current = true;
+        console.error("[WaveformChart] setSize falló", err);
+      }
+    });
+    
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [height]);
+
 
   // ── Render — mínimo, sin datos dinámicos ─────────────────────────────
   // Este JSX solo se ejecuta en mount (gracias a React.memo y la ausencia

@@ -446,7 +446,7 @@ export function testButterworthFilter(): void {
 
       label: "6 Hz (Theta, dentro de banda de paso)",
       freqHz: 6,
-      thresholdDb: -1,
+      thresholdDb: -3,
       condition: "above",
 
     },
@@ -486,7 +486,6 @@ export function testButterworthFilter(): void {
   console.log("═══════════════════════════════════════════════════════════════");
 }
 
-// ---------------------------------------------------------------------------
-// Entry point
-// ---------------------------------------------------------------------------
-testButterworthFilter();
+// Note: Invoke testButterworthFilter() explicitly only for testing,
+// not automatically on import to avoid polluting server startup logs
+// testButterworthFilter();

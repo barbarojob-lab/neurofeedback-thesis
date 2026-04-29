@@ -59,7 +59,6 @@ import type {
   BandPowers,
   FeedbackCommand,
   SessionConfig,
-  ThetaBetaResult,
   ZScoreResult,
   FeedbackPayload,
 } from "../types";
@@ -74,6 +73,7 @@ import type {
  * Suficiente para que el terapeuta vea transitorios y artefactos recientes.
  */
 const WAVEFORM_BUFFER_SIZE = 500;
+const MIN_BAND_POWER = 1e-6;
 
 // ---------------------------------------------------------------------------
 // Interfaces del store
@@ -104,19 +104,46 @@ export interface EEGState {
    */
   waveformIndex  : number;
 
+  /**
+   * Contador interno para throttling de waveformIndex.
+   * Se incrementa en cada sample, se resetea cada 8 samples.
+   * Interno: no debe usarse en componentes (no exportar selectores para este).
+   */
+  throttleCounter: number;
+
   // ── Métricas actuales del epoch ─────────────────────────────────────────
   /** Potencias por banda en µV² del último epoch analizado. null durante warm-up. */
   bandPowers     : BandPowers | null;
+  /** Máximo observado por banda durante la sesión actual (normalización visual). */
+  sessionMaxBandPowers: Record<keyof Omit<BandPowers, "timestamp">, number>;
   /** Ratio theta/beta del último epoch (0 durante warm-up) */
   thetaBetaRatio : number;
-  /** Resultado completo del normalizador adaptativo Welford */
-  zScoreResult   : ZScoreResult | null;
-  /** Z-score suavizado (EMA) del último epoch. 0 durante warm-up. */
-  zScore         : number;
-  /** Último comando de feedback emitido por el motor adaptativo */
-  command        : FeedbackCommand | null;
+  /** ✅ NUEVO: Predicción de estado del clasificador */
+  state_prediction: {
+    predicted_label: "awake" | "induction" | "trance";
+    confidence: number;  // 0–1
+    class_probabilities: {
+      awake: number;
+      induction: number;
+      trance: number;
+    };
+  } | null;
   /** Tiempo de procesamiento del último epoch en el servidor [ms] */
   pipelineMs     : number;
+  /** Ratio theta(Fz) / media theta(F3,F4) */
+  frontalSpecificity : number;
+  /** true cuando la validación topográfica permite feedback */
+  frontalSpecificityValid : boolean;
+  /** true cuando se detectó artefacto ocular en Fp1/Fp2 */
+  artifactDetected : boolean;
+  /** Mapa theta normalizado [0,1] por canal */
+  topographyTheta : Record<string, number>;
+  /** Canal seleccionado para inspección */
+  inspectionChannel: string;
+  /** Bloque de señal filtrada del canal de inspección */
+  inspectionFilteredSamples: number[];
+  /** Magnitudes FFT del canal de inspección */
+  inspectionFftMagnitudes: number[];
 
   // ── Estado de sesión ─────────────────────────────────────────────────────
   isConnected     : boolean;
@@ -155,6 +182,7 @@ export interface EEGState {
   setSessionActive : (active: boolean, sessionId?: string) => void;
   setSessionConfig : (config: SessionConfig | null) => void;
   setError         : (message: string | null) => void;
+  setInspectionChannel: (channel: string) => void;
 
   /** Resetea el store al estado inicial (nueva sesión o desconexión) */
   resetSession : () => void;
@@ -177,11 +205,23 @@ const createInitialState = () => ({
   waveformIndex   : 0,
   throttleCounter : 0,
   bandPowers      : null as BandPowers | null,
+  sessionMaxBandPowers: {
+    delta: MIN_BAND_POWER,
+    theta: MIN_BAND_POWER,
+    alpha: MIN_BAND_POWER,
+    beta : MIN_BAND_POWER,
+    gamma: MIN_BAND_POWER,
+  },
   thetaBetaRatio  : 0,
-  zScoreResult    : null as ZScoreResult | null,
-  zScore          : 0,
-  command         : null as FeedbackCommand | null,
+  state_prediction: null,
   pipelineMs      : 0,
+  frontalSpecificity: 0,
+  frontalSpecificityValid: false,
+  artifactDetected: false,
+  topographyTheta: {},
+  inspectionChannel: "Fz",
+  inspectionFilteredSamples: [],
+  inspectionFftMagnitudes: [],
   isConnected     : false,
   isSessionActive : false,
   sessionId       : null as string | null,
@@ -215,36 +255,45 @@ export const useEEGStore = create<EEGState>()(
     // ── pushWaveformSample ────────────────────────────────────────────────
     pushWaveformSample: (sample: number) => {
       // Mutación in-place: NO crea nuevo Float32Array.
-      // `get()` es síncrono y no causa re-render — es solo lectura del estado.
       const { waveformBuffer, waveformIndex } = get();
 
       waveformBuffer[waveformIndex] = sample;
       const nextIndex = (waveformIndex + 1) % WAVEFORM_BUFFER_SIZE;
 
-      // Solo actualizamos `waveformIndex` — un número primitivo.
-      // Zustand compara por referencia: number === number → comparación de valor.
-      // Los componentes suscritos a waveformIndex re-renderizan solo cuando
-      // el índice cambia (es decir, siempre — pero a 250 Hz el canvas ya usa
-      // requestAnimationFrame que limita a 60 fps de todos modos).
-      //
-      // Si 250 actualizaciones/s siguen siendo demasiadas, se puede throttlear:
-      //   if (nextIndex % 8 === 0) set({ waveformIndex: nextIndex });
-      // Lo que actualiza el índice solo 31 veces/s manteniendo el buffer al día.
+      // IMPORTANTE: actualizar el índice en CADA sample, sin throttle.
+      // El RAF loop depende del cambio del índice para detectar datos nuevos.
+      // Como el servidor solo envía ~4 samples/s, no hay presión de renders.
+      // (Si fuera 250/s en un contexto real, aquí habría throttle, pero con
+      //  comunicación por WebSocket cada sample es genuinamente nuevo y debe
+      //  ser visible inmediatamente.)
       set({ waveformIndex: nextIndex });
     },
 
     // ── updateMetrics ─────────────────────────────────────────────────────
+
     updateMetrics: (payload: FeedbackPayload) => {
       // Un único setState → una sola notificación a todos los suscriptores.
-      // Sin this, cuatro setters separados causarían cuatro renders por epoch.
-      set({
-        bandPowers     : payload.bandPowers,
+      set((state) => ({
+        bandPowers: payload.bandPowers,
+        sessionMaxBandPowers: {
+          delta: Math.max(state.sessionMaxBandPowers.delta, payload.bandPowers.delta),
+          theta: Math.max(state.sessionMaxBandPowers.theta, payload.bandPowers.theta),
+          alpha: Math.max(state.sessionMaxBandPowers.alpha, payload.bandPowers.alpha),
+          beta : Math.max(state.sessionMaxBandPowers.beta, payload.bandPowers.beta),
+          gamma: Math.max(state.sessionMaxBandPowers.gamma, payload.bandPowers.gamma),
+        },
         thetaBetaRatio : payload.thetaBeta.ratio,
-        zScoreResult   : payload.zScore,
-        zScore         : payload.zScore.zSmooth,
-        command        : payload.command,
+        // ✅ NUEVO: Usar state_prediction del clasificador
+        state_prediction: payload.state_prediction,
         pipelineMs     : payload.pipelineMs,
-      });
+        frontalSpecificity: payload.frontalSpecificity,
+        frontalSpecificityValid: payload.frontalSpecificityValid,
+        artifactDetected: payload.artifactDetected,
+        topographyTheta: payload.topographyTheta,
+        inspectionChannel: payload.inspection.channel,
+        inspectionFilteredSamples: payload.inspection.filteredSamples,
+        inspectionFftMagnitudes: payload.inspection.fftMagnitudes,
+      }));
     },
 
     // ── setConnected ──────────────────────────────────────────────────────
@@ -276,6 +325,11 @@ export const useEEGStore = create<EEGState>()(
         }));
         console.error(`[EEGStore] Server error: ${message}`);
       }
+    },
+
+    // ── setInspectionChannel ──────────────────────────────────────────
+    setInspectionChannel: (channel: string) => {
+      set({ inspectionChannel: channel });
     },
 
     // ── resetSession ──────────────────────────────────────────────────────
@@ -310,29 +364,37 @@ export const useEEGStore = create<EEGState>()(
 export const selectWaveformIndex   = (s: EEGState) => s.waveformIndex;
 export const selectWaveformBuffer  = (s: EEGState) => s.waveformBuffer;
 export const selectBandPowers      = (s: EEGState) => s.bandPowers;
+export const selectSessionMaxBandPowers = (s: EEGState) => s.sessionMaxBandPowers;
 export const selectThetaBetaRatio  = (s: EEGState) => s.thetaBetaRatio;
-export const selectZScore          = (s: EEGState) => s.zScore;
-export const selectZScoreResult    = (s: EEGState) => s.zScoreResult;
-export const selectCommand         = (s: EEGState) => s.command;
+// ✅ NUEVO: Selector para predicción de estado
+export const selectStatePrediction = (s: EEGState) => s.state_prediction;
 export const selectIsConnected     = (s: EEGState) => s.isConnected;
 export const selectIsSessionActive = (s: EEGState) => s.isSessionActive;
 export const selectPipelineMs      = (s: EEGState) => s.pipelineMs;
 export const selectLastError       = (s: EEGState) => s.lastError;
+export const selectFrontalSpecificity = (s: EEGState) => s.frontalSpecificity;
+export const selectFrontalSpecificityValid = (s: EEGState) => s.frontalSpecificityValid;
+export const selectArtifactDetected = (s: EEGState) => s.artifactDetected;
+export const selectTopographyTheta = (s: EEGState) => s.topographyTheta;
+export const selectInspectionChannel = (s: EEGState) => s.inspectionChannel;
+export const selectInspectionFilteredSamples = (s: EEGState) => s.inspectionFilteredSamples;
+export const selectInspectionFftMagnitudes = (s: EEGState) => s.inspectionFftMagnitudes;
 
 /**
- * Selector compuesto para el panel del terapeuta.
- * Retorna un objeto estable: solo cambia cuando cambian las métricas del epoch,
- * no con cada sample de la forma de onda.
+ * Selector compuesto para el panel del investigador.
+ * Retorna un objeto estable: solo cambia cuando cambian las métricas del epoch.
  *
  * ⚠️  No usar en componentes de alto rendimiento — prefiere selectores atómicos.
  */
 export const selectTherapistPanel = (s: EEGState) => ({
   bandPowers     : s.bandPowers,
   thetaBetaRatio : s.thetaBetaRatio,
-  zScore         : s.zScore,
-  zScoreResult   : s.zScoreResult,
-  command        : s.command,
+  statePrediction: s.state_prediction,
   pipelineMs     : s.pipelineMs,
+  frontalSpecificity: s.frontalSpecificity,
+  frontalSpecificityValid: s.frontalSpecificityValid,
+  artifactDetected: s.artifactDetected,
+  topographyTheta: s.topographyTheta,
   isConnected    : s.isConnected,
   isSessionActive: s.isSessionActive,
   sessionId      : s.sessionId,

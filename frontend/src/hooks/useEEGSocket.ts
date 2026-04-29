@@ -54,6 +54,7 @@ import {
   useEffect,
   useRef,
   useCallback,
+  useState,
 } from "react";
 
 import { useEEGStore } from "../store/eegStore";
@@ -63,6 +64,7 @@ import type {
   ServerMessage,
   SessionConfig,
   SubjectiveMeasure,
+  DatasetMetadata,
 } from "../types";
 
 import {
@@ -71,13 +73,43 @@ import {
   isSessionStarted,
   isSessionStopped,
   isServerError,
+  isInspectionChannelSet,
+  isDatasetLoaded,
 } from "../types";
 
 // ---------------------------------------------------------------------------
 // Constantes del backoff
 // ---------------------------------------------------------------------------
 
-const WS_URL        = import.meta.env.VITE_WS_URL ?? "ws://localhost:8080";
+/**
+ * Calcula la URL del WebSocket con fallback inteligente:
+ * 1. Si hay VITE_WS_URL en .env, usar ese valor directamente
+ * 2. Si la página está en HTTPS, usar WSS (WebSocket Secure)
+ * 3. Si está en HTTP, usar WS
+ * 4. En localhost siempre usar WS (desarrollo local sin certificado)
+ *
+ * Ejemplos:
+ *   localhost (dev):           ws://localhost:8080
+ *   https://example.com/app:   wss://example.com:8080
+ *   http://example.com/app:    ws://example.com:8080
+ */
+function resolveWsUrl(): string {
+  const envUrl = import.meta.env.VITE_WS_URL;
+  if (envUrl) return envUrl;
+
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  const host = window.location.hostname;
+  const port = 8080; // puerto default del servidor neurofeedback
+
+  // En localhost, no usar el puerto configurado — el dev server redirige
+  if (host === "localhost" || host === "127.0.0.1") {
+    return `ws://localhost:${port}`;
+  }
+
+  return `${protocol}://${host}:${port}`;
+}
+
+const WS_URL        = resolveWsUrl();
 const BASE_DELAY_MS = 1_000;   // 1 s — primer intento de reconexión
 const MAX_DELAY_MS  = 30_000;  // 30 s — techo del backoff
 const MAX_ATTEMPTS  = 10;      // abandonar tras 10 intentos fallidos consecutivos
@@ -103,6 +135,12 @@ export interface UseEEGSocketReturn {
   setTranceMode   : (enabled: boolean) => void;
   /** Envía una medida subjetiva a la base de datos del servidor */
   submitSubjective: (measure: SubjectiveMeasure) => void;
+  /** Selecciona el canal para el panel de inspección */
+  setInspectionChannel: (channel: string) => void;
+  /** Carga metadata de dataset EEG desde ruta local del backend */
+  loadDataset: (filePath: string) => void;
+  /** Último dataset cargado */
+  dataset: DatasetMetadata | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -116,19 +154,19 @@ export function useEEGSocket(): UseEEGSocketReturn {
   const reconnectTimerRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isMountedRef         = useRef<boolean>(true);
   const reconnectAttemptState= useRef<number>(0); // para exponer al consumidor
+  const [dataset, setDataset] = useState<DatasetMetadata | null>(null);
 
-  // ── Acciones del store ────────────────────────────────────────────────
-  const {
-    pushWaveformSample,
-    updateMetrics,
-    setConnected,
-    setSessionActive,
-    setSessionConfig,
-    setError,
-    resetSession,
-    isConnected,
-    isSessionActive,
-  } = useEEGStore();
+  // ── Acciones/estado del store con selectores atómicos ────────────────
+  const pushWaveformSample = useEEGStore((s) => s.pushWaveformSample);
+  const updateMetrics = useEEGStore((s) => s.updateMetrics);
+  const setConnected = useEEGStore((s) => s.setConnected);
+  const setSessionActive = useEEGStore((s) => s.setSessionActive);
+  const setSessionConfig = useEEGStore((s) => s.setSessionConfig);
+  const setError = useEEGStore((s) => s.setError);
+  const setInspectionChannelState = useEEGStore((s) => s.setInspectionChannel);
+  const resetSession = useEEGStore((s) => s.resetSession);
+  const isConnected = useEEGStore((s) => s.isConnected);
+  const isSessionActive = useEEGStore((s) => s.isSessionActive);
 
   // ── Calcular delay de backoff ─────────────────────────────────────────
   const getBackoffDelay = useCallback((attempt: number): number => {
@@ -153,8 +191,12 @@ export function useEEGSocket(): UseEEGSocketReturn {
 
       if (isFeedbackPayload(msg)) {
         // Hot path — ~4 veces/segundo
-        // 1. Sample para el ring buffer (O(1), sin re-render)
-        pushWaveformSample(msg.filteredSample);
+        // 1. Todos los samples del hop → ring buffer (O(n), sin re-render)
+        //    filteredSamples tiene hopSize=64 muestras → 250 sps reales en el osciloscopio
+        const samples = msg.filteredSamples ?? [msg.filteredSample];
+        for (let i = 0; i < samples.length; i++) {
+          pushWaveformSample(samples[i]!);
+        }
         // 2. Métricas del epoch (un setState agrupa todo)
         updateMetrics(msg);
         return;
@@ -170,6 +212,7 @@ export function useEEGSocket(): UseEEGSocketReturn {
         if (msg.session) {
           setSessionActive(true, msg.session.id);
         }
+        setDataset(msg.dataset ?? null);
         return;
       }
 
@@ -191,6 +234,16 @@ export function useEEGSocket(): UseEEGSocketReturn {
         return;
       }
 
+      if (isInspectionChannelSet(msg)) {
+        setInspectionChannelState(msg.channel);
+        return;
+      }
+
+      if (isDatasetLoaded(msg)) {
+        setDataset(msg.dataset);
+        return;
+      }
+
       // Mensajes informativos que no requieren acción en el store
       switch (msg.type) {
         case "pong":
@@ -206,7 +259,7 @@ export function useEEGSocket(): UseEEGSocketReturn {
           console.warn("[useEEGSocket] Mensaje no reconocido:", (msg as { type: string }).type);
       }
     },
-    [pushWaveformSample, updateMetrics, setConnected, setSessionActive, setError, resetSession]
+    [pushWaveformSample, updateMetrics, setSessionActive, setError, setInspectionChannelState, resetSession]
   );
 
   // ── Conectar WebSocket ────────────────────────────────────────────────
@@ -308,7 +361,9 @@ export function useEEGSocket(): UseEEGSocketReturn {
 
       window.removeEventListener("beforeunload", handleBeforeUnload);
     };
-  }, [connect]); // `connect` es estable por useCallback sin dependencias variables
+  // Evita re-suscripciones WS por cambios de identidad en callbacks durante renders.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── sendMessage ───────────────────────────────────────────────────────
   const sendMessage = useCallback((msg: WSMessage): void => {
@@ -354,6 +409,21 @@ export function useEEGSocket(): UseEEGSocketReturn {
     [sendMessage]
   );
 
+  const setInspectionChannel = useCallback(
+    (channel: string) => {
+      setInspectionChannelState(channel);
+      sendMessage({ type: "set_inspection_channel", payload: { channel } });
+    },
+    [sendMessage, setInspectionChannelState]
+  );
+
+  const loadDataset = useCallback(
+    (filePath: string) => {
+      sendMessage({ type: "load_dataset", payload: { path: filePath } });
+    },
+    [sendMessage]
+  );
+
   // ── Valor de retorno ──────────────────────────────────────────────────
   return {
     isConnected,
@@ -364,5 +434,8 @@ export function useEEGSocket(): UseEEGSocketReturn {
     stopSession,
     setTranceMode,
     submitSubjective,
+    setInspectionChannel,
+    loadDataset,
+    dataset,
   };
 }

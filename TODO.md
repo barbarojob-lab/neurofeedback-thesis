@@ -1,1 +1,12 @@
-# TODO: Create Git branch 'tesis 1.0' - COMPLETE\n\nStatus: Branch 'tesis 1.0' created from initial commit. Local Git repo ready.\nRepo remote not found - create on GitHub.com:\n1. Go to github.com/new\n2. Name: neurofeedback-thesis\n3. No README, .gitignore, license (add later)\n4. Create, then:\n  git push -u origin master\n  git push -u origin \"tesis 1.0\"\n\n- [x] All steps\n\nRun: git branch -a
+# Neurofeedback Corrections TODO
+
+## Plan Breakdown (Approved)
+1. [ ] ✅ Create this TODO.md
+2. [ ] Edit frontend/src/index.css (#root CSS)
+3. [ ] Edit frontend/src/App.tsx (remove border_color, fix borderColor)
+4. [ ] Edit frontend/src/store/eegStore.ts (throttle waveformIndex to %8)
+5. [ ] Edit frontend/src/components/WaveformChart.tsx (add ResizeObserver)
+6. [ ] Test: cd frontend && npm run dev (verify waveform smooth, resize, borders, layout)
+7. [ ] Complete task
+
+**Status: Starting edits...**

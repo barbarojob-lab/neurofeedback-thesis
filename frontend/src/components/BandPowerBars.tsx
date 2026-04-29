@@ -31,8 +31,12 @@
  *   - Las demás bandas usan colores suaves para no competir con theta.
  */
 
-import React, { memo, useRef, useMemo } from "react";
-import { useEEGStore, selectBandPowers } from "../store/eegStore";
+import { memo, useMemo } from "react";
+import {
+  useEEGStore,
+  selectBandPowers,
+  selectSessionMaxBandPowers,
+} from "../store/eegStore";
 import type { BandPowers } from "../types";
 
 // ---------------------------------------------------------------------------
@@ -191,37 +195,21 @@ const BandBar = memo(function BandBar({
 
 const BandPowerBars = memo(function BandPowerBars() {
   const bandPowers = useEEGStore(selectBandPowers);
+  const sessionMax = useEEGStore(selectSessionMaxBandPowers);
 
-  // Máximos por banda a lo largo de la sesión — useRef para no causar renders
-  const sessionMax = useRef<Record<string, number>>({
-    delta: MIN_POWER,
-    theta: MIN_POWER,
-    alpha: MIN_POWER,
-    beta : MIN_POWER,
-    gamma: MIN_POWER,
-  });
-
-  // Actualizar máximos e calcular porcentajes — todo en useMemo para O(5)
+  // Calcular porcentajes en O(5)
   const barData = useMemo(() => {
     if (!bandPowers) {
       return BAND_CONFIG.map((c) => ({ config: c, percent: 0, rawValue: 0 }));
     }
 
-    // Actualizar máximos de sesión
-    for (const cfg of BAND_CONFIG) {
-      const v = bandPowers[cfg.key] ?? 0;
-      if (v > sessionMax.current[cfg.key]) {
-        sessionMax.current[cfg.key] = v;
-      }
-    }
-
     return BAND_CONFIG.map((cfg) => {
       const v       = bandPowers[cfg.key] ?? 0;
-      const max     = sessionMax.current[cfg.key];
+      const max     = sessionMax[cfg.key];
       const percent = toPercent(v, max);
       return { config: cfg, percent, rawValue: v };
     });
-  }, [bandPowers]);
+  }, [bandPowers, sessionMax]);
 
   return (
     <div style={{
