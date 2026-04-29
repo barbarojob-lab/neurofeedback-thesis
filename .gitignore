@@ -73,6 +73,7 @@ EEG/data/
 
 # Generated training artifacts (reproducible via scripts)
 data/sessions.npz
+data/sub-*.edf
 ml-service/models/
 
 # IDE/editor

@@ -17,6 +17,7 @@ scipy>=1.11
 scikit-learn>=1.4
 joblib>=1.3
 mne>=1.6
+edfio>=0.4          # exportar señales MNE a formato EDF estándar
 fastapi>=0.110
 uvicorn[standard]>=0.27
 pydantic>=2.0
