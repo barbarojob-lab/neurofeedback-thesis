@@ -43,6 +43,8 @@ from sklearn.pipeline import Pipeline as SKPipelineType
 from .classifier import (
     CLASS_LABELS,
     CONFIDENCE_THRESHOLD,
+    MODEL_PATH_HIGH,
+    MODEL_PATH_LOW,
     N_FEATURES,
     build_feature_vector,
     load_classifier,
@@ -65,26 +67,37 @@ from .connectivity import (
 # El modelo se guarda en memoria de proceso para evitar deserializar joblib
 # en cada llamada. A 4 payloads/s, recargar el modelo implicaría ~4 lecturas
 # de disco por segundo, que degradan la latencia del pipeline.
-_cached_model: Optional[SKPipelineType] = None
-_model_loaded: bool = False  # flag para no reintentar si falló la carga
+_cached_models: Dict[str, Optional[SKPipelineType]] = {
+    "high": None,
+    "low": None,
+}
+_models_loaded: Dict[str, bool] = {
+    "high": False,
+    "low": False,
+}
 
 
-def _get_model() -> Optional[SKPipelineType]:
-    """Retorna el modelo cacheado, intentando cargarlo la primera vez."""
-    global _cached_model, _model_loaded
-    if not _model_loaded:
-        _cached_model = load_classifier()
-        _model_loaded = True
-        if _cached_model is None:
+def _normalize_suggestibility(value: str) -> str:
+    return "low" if str(value).lower() == "low" else "high"
+
+
+def _get_model(suggestibility: str = "high") -> Optional[SKPipelineType]:
+    """Retorna el modelo cacheado (high/low), intentando cargarlo la primera vez."""
+    key = _normalize_suggestibility(suggestibility)
+    if not _models_loaded[key]:
+        model_path = MODEL_PATH_LOW if key == "low" else MODEL_PATH_HIGH
+        _cached_models[key] = load_classifier(model_path=model_path)
+        _models_loaded[key] = True
+        if _cached_models[key] is None:
             print(
-                "[pipeline] No se encontró modelo entrenado. "
+                f"[pipeline] No se encontró modelo entrenado para suggestibility='{key}'. "
                 "Usando clasificador heurístico como fallback. "
                 "Ejecuta: python train_classifier.py"
             )
-    return _cached_model
+    return _cached_models[key]
 
 
-def reload_model() -> bool:
+def reload_model(suggestibility: Optional[str] = None) -> bool:
     """
     Fuerza la recarga del modelo desde disco.
     Llamar después de entrenar/actualizar el modelo.
@@ -92,9 +105,16 @@ def reload_model() -> bool:
     Returns:
         True si el modelo se cargó correctamente, False en caso contrario.
     """
-    global _cached_model, _model_loaded
-    _model_loaded = False
-    model = _get_model()
+    if suggestibility is None:
+        _models_loaded["high"] = False
+        _models_loaded["low"] = False
+        high_ok = _get_model("high") is not None
+        low_ok = _get_model("low") is not None
+        return high_ok or low_ok
+
+    key = _normalize_suggestibility(suggestibility)
+    _models_loaded[key] = False
+    model = _get_model(key)
     return model is not None
 
 
@@ -106,6 +126,7 @@ def process_window(
     eeg_window: np.ndarray,
     band_powers_per_channel: Dict[str, Dict[str, float]],
     frontal_specificity: float = 1.0,
+    suggestibility: str = "high",
     fs: int = 250,
 ) -> Dict[str, Any]:
     """
@@ -207,7 +228,8 @@ def process_window(
         frontal_specificity=frontal_specificity,
     )
 
-    model = _get_model()
+    profile = _normalize_suggestibility(suggestibility)
+    model = _get_model(profile)
     if model is not None:
         prediction = predict_state(model, feature_vector)
     else:
@@ -216,6 +238,7 @@ def process_window(
         prediction = _heuristic_fallback(
             band_powers_per_channel=band_powers_per_channel,
             coh_fz_pz=fz_pz_coh,
+            suggestibility=profile,
         )
 
     processing_ms = (time.perf_counter() - t0) * 1000.0
@@ -228,6 +251,7 @@ def process_window(
         "classifier_prediction": prediction,
         "feature_vector":        feature_vector.tolist(),
         "processing_ms":         round(processing_ms, 2),
+        "suggestibility_profile": profile,
     }
 
 
@@ -238,6 +262,7 @@ def process_window(
 def _heuristic_fallback(
     band_powers_per_channel: Dict[str, Dict[str, float]],
     coh_fz_pz: float,
+    suggestibility: str = "high",
 ) -> Dict[str, Any]:
     """
     Clasificación basada en umbrales fijos cuando el modelo ML no está
@@ -265,6 +290,9 @@ def _heuristic_fallback(
         state, conf = 1, 0.60   # induction: TBR o coherencia en rango medio
     else:
         state, conf = 0, 0.68   # awake: ningún criterio de trance cumplido
+
+    if suggestibility == "low" and state == 2:
+        state, conf = 1, 0.60
 
     probs = {CLASS_LABELS[k]: 0.0 for k in CLASS_LABELS}
     probs[CLASS_LABELS[state]] = conf

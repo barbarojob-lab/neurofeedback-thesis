@@ -71,9 +71,15 @@ pids/
 data/yoga_eeg/
 EEG/data/
 
+# Raw EEG recordings — archivos binarios grandes (no versionar)
+data/ICApruned_highs/
+data/ICApruned_lows/
+
 # Generated training artifacts (reproducible via scripts)
 data/sessions.npz
+data/sessions_icapruned.npz
 data/sub-*.edf
+data/*.edf
 ml-service/models/
 
 # IDE/editor

@@ -30,6 +30,7 @@ import React, {
   useState,
   useCallback,
   useId,
+  useEffect,
 } from "react";
 
 import WaveformChart    from "./components/WaveformChart";
@@ -221,10 +222,15 @@ function ControlPanel({
 }: ControlPanelProps) {
   const [patientId,    setPatientId]    = useState("");
   const [group,        setGroup]        = useState<"experimental" | "control">("experimental");
+  const [suggestibility, setSuggestibility] = useState<"high" | "low">("high");
   const [tranceMode,   setTranceModeLocal] = useState(false);
   const [sigmoidK,     setSigmoidK]     = useState(2.0);
   const [thetaThresh,  setThetaThresh]  = useState(0.0);
   const [datasetPath, setDatasetPath] = useState("");
+  const [datasetOptions, setDatasetOptions] = useState<string[]>([]);
+  const [datasetQuery, setDatasetQuery] = useState("");
+  const [loadingDatasets, setLoadingDatasets] = useState(false);
+  const [datasetsError, setDatasetsError] = useState<string | null>(null);
 
   const patientIdId = useId();
   const groupId     = useId();
@@ -234,15 +240,60 @@ function ControlPanel({
       thetaThreshold        : thetaThresh,
       thetaPeakTbrThreshold : 2.5,
       sigmoidK,
+      suggestibility,
     };
     onStart(config);
-  }, [onStart, thetaThresh, sigmoidK]);
+  }, [onStart, thetaThresh, sigmoidK, suggestibility]);
 
   const handleTranceToggle = useCallback(() => {
     const next = !tranceMode;
     setTranceModeLocal(next);
     onTranceToggle(next);
   }, [tranceMode, onTranceToggle]);
+
+  const refreshDatasets = useCallback(async () => {
+    setLoadingDatasets(true);
+    setDatasetsError(null);
+    try {
+      const res = await fetch("http://localhost:8080/datasets");
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+
+      const body = (await res.json()) as { datasets?: string[] };
+      const list = Array.isArray(body.datasets) ? body.datasets : [];
+      setDatasetOptions(list);
+
+      const firstMatch = list.find((p) => p.toLowerCase().includes(datasetQuery.toLowerCase()));
+      if (!datasetPath && firstMatch) {
+        setDatasetPath(firstMatch);
+      }
+    } catch (err) {
+      setDatasetsError((err as Error).message);
+      setDatasetOptions([]);
+    } finally {
+      setLoadingDatasets(false);
+    }
+  }, [datasetPath, datasetQuery]);
+
+  useEffect(() => {
+    if (isConnected) {
+      void refreshDatasets();
+    }
+  }, [isConnected, refreshDatasets]);
+
+  const filteredDatasetOptions = datasetQuery.trim().length === 0
+    ? datasetOptions
+    : datasetOptions.filter((p) => p.toLowerCase().includes(datasetQuery.toLowerCase()));
+
+  useEffect(() => {
+    if (filteredDatasetOptions.length === 0) {
+      return;
+    }
+    if (!filteredDatasetOptions.includes(datasetPath)) {
+      setDatasetPath(filteredDatasetOptions[0] ?? "");
+    }
+  }, [filteredDatasetOptions, datasetPath]);
 
   const inputStyle: React.CSSProperties = {
     width           : "100%",
@@ -320,6 +371,18 @@ function ControlPanel({
         </select>
       )}
 
+      {field("SUGESTIONABILIDAD",
+        <select
+          value={suggestibility}
+          onChange={(e) => setSuggestibility(e.target.value as "high" | "low")}
+          disabled={isSessionActive}
+          style={inputStyle}
+        >
+          <option value="high">Alta (high)</option>
+          <option value="low">Baja (low)</option>
+        </select>
+      )}
+
       {field("SIGMOID K (sensibilidad)",
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <input
@@ -378,15 +441,68 @@ function ControlPanel({
         </select>
       )}
 
-      {field("DATASET (ruta local)",
+      {field("DATASET (busqueda)",
         <div style={{ display: "grid", gap: 6 }}>
+          <div style={{ display: "flex", gap: 6 }}>
+            <input
+              type="text"
+              value={datasetQuery}
+              onChange={(e) => setDatasetQuery(e.target.value)}
+              placeholder="Buscar por nombre: subject, sesion, etc."
+              style={{ ...inputStyle, flex: 1 }}
+            />
+            <button
+              onClick={() => void refreshDatasets()}
+              disabled={!isConnected || loadingDatasets}
+              style={{
+                padding: "6px 10px",
+                borderRadius: 5,
+                border: "none",
+                cursor: !isConnected || loadingDatasets ? "not-allowed" : "pointer",
+                backgroundColor: "rgba(255,255,255,0.08)",
+                color: "rgba(255,255,255,0.85)",
+                fontFamily: "'JetBrains Mono', monospace",
+                fontSize: 10,
+              } as React.CSSProperties}
+            >
+              {loadingDatasets ? "BUSCANDO..." : "REFRESH"}
+            </button>
+          </div>
+
+          <select
+            value={datasetPath}
+            onChange={(e) => setDatasetPath(e.target.value)}
+            disabled={!isConnected || filteredDatasetOptions.length === 0}
+            style={inputStyle}
+          >
+            {filteredDatasetOptions.length === 0 && (
+              <option value="">
+                {loadingDatasets ? "Detectando datasets..." : "Sin resultados (EDF/CSV)"}
+              </option>
+            )}
+            {filteredDatasetOptions.map((p) => (
+              <option key={p} value={p}>{p}</option>
+            ))}
+          </select>
+
           <input
             type="text"
             value={datasetPath}
             onChange={(e) => setDatasetPath(e.target.value)}
-            placeholder="D:/datasets/eeg/sesion01.edf"
+            placeholder="Ruta manual opcional"
             style={inputStyle}
           />
+
+          {datasetsError && (
+            <div style={{
+              fontFamily: "'JetBrains Mono', monospace",
+              fontSize: 10,
+              color: "#ff8a80",
+            }}>
+              Error listando datasets: {datasetsError}
+            </div>
+          )}
+
           <button
             onClick={() => onLoadDataset(datasetPath.trim())}
             disabled={!datasetPath.trim() || !isConnected}

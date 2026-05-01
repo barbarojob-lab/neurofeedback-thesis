@@ -75,6 +75,8 @@
  */
 
 import http     from "http";
+import fs from "fs/promises";
+import path from "path";
 import { WebSocketServer, WebSocket } from "ws";
 import { parseDatasetMetadata, type DatasetMetadata } from "./datasets/parser";
 import { DatasetReplayer } from "./datasets/replayer";
@@ -533,6 +535,7 @@ async function processSample(rawByChannel: ChannelSample, wss: WebSocketServer):
       eeg_window: mlWindow,
       band_powers_per_channel: mlBandPowers,
       frontal_specificity: frontalSpecificity,
+      suggestibility: currentSession?.config?.suggestibility === "low" ? "low" : "high",
     });
 
     const pipelineMs = Date.now() - t0;
@@ -790,8 +793,53 @@ function handleMessage(ws: WebSocket, wss: WebSocketServer, raw: string): void {
 // ---------------------------------------------------------------------------
 
 /** Crea el servidor HTTP (health-check + upgrade WS) */
+async function listDatasetsFromDataDir(): Promise<string[]> {
+  const root = path.resolve(process.cwd(), "..", "data");
+
+  async function walk(dir: string): Promise<string[]> {
+    let entries: Array<{ name: string; isDirectory: () => boolean }> = [];
+    try {
+      const rawEntries = await fs.readdir(dir, { withFileTypes: true });
+      entries = rawEntries.map((entry) => ({
+        name: String(entry.name),
+        isDirectory: () => entry.isDirectory(),
+      }));
+    } catch {
+      return [];
+    }
+
+    const out: string[] = [];
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        out.push(...(await walk(full)));
+        continue;
+      }
+
+      const ext = path.extname(entry.name).toLowerCase();
+      if (ext === ".edf" || ext === ".csv") {
+        out.push(full);
+      }
+    }
+    return out;
+  }
+
+  const files = await walk(root);
+  return files.sort((a, b) => a.localeCompare(b));
+}
+
 function createHttpServer(): http.Server {
-  return http.createServer((req, res) => {
+  return http.createServer(async (req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
     if (req.url === "/health" && req.method === "GET") {
       const health = {
         status    : "ok",
@@ -803,6 +851,19 @@ function createHttpServer(): http.Server {
       };
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(health));
+    } else if (req.url === "/datasets" && req.method === "GET") {
+      try {
+        const datasets = await listDatasetsFromDataDir();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ datasets }));
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: `No se pudo listar datasets: ${(err as Error).message}`,
+          })
+        );
+      }
     } else {
       res.writeHead(404);
       res.end("Not Found");

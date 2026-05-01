@@ -76,6 +76,7 @@ export interface ProcessWindowPayload {
   eeg_window:              number[][];                  // [11][500]
   band_powers_per_channel: Record<string, Record<string, number>>;
   frontal_specificity:     number;
+  suggestibility?:         "high" | "low";
 }
 
 // ── Constantes ───────────────────────────────────────────────────────────────

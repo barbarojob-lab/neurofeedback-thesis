@@ -364,6 +364,9 @@ export interface SessionConfig {
    * Valores típicos: 8 (OpenBCI Cyton), 16 (Cyton+Daisy), 4 (Muse 2).
    */
   channels: number;
+
+  /** Perfil de sugestionabilidad usado para seleccionar el modelo ML de estado */
+  suggestibility?: "high" | "low";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

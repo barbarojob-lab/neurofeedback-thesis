@@ -107,6 +107,7 @@ class ProcessWindowRequest(BaseModel):
     eeg_window:              list[list[float]]
     band_powers_per_channel: dict[str, dict[str, float]]
     frontal_specificity:     float = 1.0
+    suggestibility:          str = "high"
 
     @field_validator("eeg_window")
     @classmethod
@@ -150,11 +151,16 @@ async def health():
       model_loaded  : True si hay un modelo entrenado disponible
       n_features    : número de features del clasificador
     """
-    model = _get_model()
+    model_high = _get_model("high")
+    model_low = _get_model("low")
     return {
         "status":       "ok",
         "channels":     CHANNELS,
-        "model_loaded": model is not None,
+        "model_loaded": (model_high is not None) or (model_low is not None),
+        "models_loaded": {
+            "high": model_high is not None,
+            "low": model_low is not None,
+        },
         "n_features":   15,
         "port":         8001,
     }
@@ -175,6 +181,7 @@ async def api_process_window(req: ProcessWindowRequest):
             eeg_window=eeg_arr,
             band_powers_per_channel=req.band_powers_per_channel,
             frontal_specificity=req.frontal_specificity,
+            suggestibility=req.suggestibility,
         )
         return result
     except ValueError as exc:
@@ -294,6 +301,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         eeg_window=eeg_arr,
                         band_powers_per_channel=data.get("band_powers_per_channel", {}),
                         frontal_specificity=float(data.get("frontal_specificity", 1.0)),
+                        suggestibility=str(data.get("suggestibility", "high")),
                     )
                     await websocket.send_json({
                         "type": "connectivity_result",

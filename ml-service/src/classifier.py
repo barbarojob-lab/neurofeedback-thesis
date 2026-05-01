@@ -47,7 +47,12 @@ from sklearn.metrics import (
     confusion_matrix,
     f1_score,
 )
-from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test_split
+from sklearn.model_selection import (
+    StratifiedGroupKFold,
+    StratifiedKFold,
+    cross_val_score,
+    train_test_split,
+)
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
@@ -81,6 +86,8 @@ CONFIDENCE_THRESHOLD = 0.50
 _THIS_DIR   = os.path.dirname(__file__)
 MODEL_DIR   = os.path.join(_THIS_DIR, "..", "models")
 MODEL_PATH  = os.path.join(MODEL_DIR, "eeg_classifier.joblib")
+MODEL_PATH_HIGH = os.path.join(MODEL_DIR, "eeg_classifier_high.joblib")
+MODEL_PATH_LOW = os.path.join(MODEL_DIR, "eeg_classifier_low.joblib")
 
 # Número de features del vector de entrada
 N_FEATURES = 15
@@ -306,6 +313,12 @@ def train_classifier(
     y: np.ndarray,
     save_model: bool = True,
     verbose: bool = True,
+    split_indices: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+    groups: Optional[np.ndarray] = None,
+    use_group_cv: bool = False,
+    random_state: int = 42,
+    test_size: float = 0.20,
+    model_path: str = MODEL_PATH,
 ) -> Tuple[Pipeline, Dict]:
     """
     Entrena el ensemble clasificador de estados EEG y evalúa su rendimiento.
@@ -357,16 +370,20 @@ def train_classifier(
     """
     os.makedirs(MODEL_DIR, exist_ok=True)
 
-    # ── Split estratificado 80/20 ──────────────────────────────────────────
-    # stratify=y asegura que las 3 clases aparecen con la misma proporción
-    # en train y test. Sin esto, en datasets pequeños podría quedarse todo
-    # el trance en train y nada en test (o viceversa).
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y,
-        test_size=0.20,
-        random_state=42,
-        stratify=y,
-    )
+    # ── Split train/test ───────────────────────────────────────────────────
+    # Si se reciben índices predefinidos (split por sujeto), se respetan.
+    # En caso contrario se usa split estratificado clásico por muestra.
+    if split_indices is not None:
+        train_idx, test_idx = split_indices
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
+    else:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y,
+            test_size=test_size,
+            random_state=random_state,
+            stratify=y,
+        )
 
     # ── Definición de los modelos base ─────────────────────────────────────
     svm = SVC(
@@ -374,7 +391,7 @@ def train_classifier(
         C=1.0,
         gamma="scale",       # γ = 1/(n_features · Var(X)) — adaptativo
         probability=True,    # necesario para soft voting y predict_proba()
-        random_state=42,
+        random_state=random_state,
         class_weight="balanced",
     )
 
@@ -383,7 +400,7 @@ def train_classifier(
         max_depth=None,          # árboles completos — la regularización
         min_samples_split=5,     # viene del ensemble, no de la profundidad
         class_weight="balanced",
-        random_state=42,
+        random_state=random_state,
         n_jobs=-1,               # usar todos los cores disponibles
     )
 
@@ -401,11 +418,37 @@ def train_classifier(
     # ── Validación cruzada 5-fold ANTES del entrenamiento final ───────────
     # Se evalúa sobre X_train para no contaminar X_test.
     # n_jobs=-1: paraleliza los folds en múltiples cores.
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    cv_scores = cross_val_score(
-        model, X_train, y_train,
-        cv=cv, scoring="accuracy", n_jobs=-1,
-    )
+    train_groups = None
+    if groups is not None:
+        train_groups = groups[train_idx] if split_indices is not None else None
+
+    if use_group_cv and train_groups is not None:
+        unique_groups = np.unique(train_groups)
+        n_splits = min(5, len(unique_groups))
+        if n_splits < 2:
+            raise ValueError("Se requieren al menos 2 sujetos en train para CV por grupos.")
+        cv = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+        cv_scores = cross_val_score(
+            model,
+            X_train,
+            y_train,
+            groups=train_groups,
+            cv=cv,
+            scoring="accuracy",
+            n_jobs=-1,
+        )
+        split_strategy = "subject_holdout + stratified_group_kfold"
+    else:
+        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=random_state)
+        cv_scores = cross_val_score(
+            model,
+            X_train,
+            y_train,
+            cv=cv,
+            scoring="accuracy",
+            n_jobs=-1,
+        )
+        split_strategy = "stratified_sample_split + stratified_kfold"
 
     # ── Entrenamiento final en TODO X_train ───────────────────────────────
     model.fit(X_train, y_train)
@@ -419,10 +462,15 @@ def train_classifier(
     f1_macro     = f1_score(y_test, y_pred, average="macro")
     cm           = confusion_matrix(y_test, y_pred)
 
+    labels_present = sorted(int(v) for v in np.unique(y))
+
     metrics = {
         "accuracy":          float(acc),
         "f1_macro":          float(f1_macro),
-        "f1_per_class":      {CLASS_LABELS[i]: float(f) for i, f in enumerate(f1_per_class)},
+        "f1_per_class":      {
+            CLASS_LABELS[label]: float(score)
+            for label, score in zip(labels_present, f1_per_class)
+        },
         "confusion_matrix":  cm.tolist(),
         "cv_mean_accuracy":  float(cv_scores.mean()),
         "cv_std_accuracy":   float(cv_scores.std()),
@@ -431,15 +479,25 @@ def train_classifier(
         "n_test":            int(len(X_test)),
         "n_features":        N_FEATURES,
         "feature_names":     _feature_names(),
+        "split_strategy":    split_strategy,
+        "labels_present":    labels_present,
     }
+
+    if groups is not None:
+        if split_indices is not None:
+            metrics["n_train_subjects"] = int(len(np.unique(groups[train_idx])))
+            metrics["n_test_subjects"] = int(len(np.unique(groups[test_idx])))
+        else:
+            metrics["n_train_subjects"] = None
+            metrics["n_test_subjects"] = None
 
     if verbose:
         _print_training_report(metrics, y_test, y_pred)
 
     if save_model:
-        joblib.dump(model, MODEL_PATH)
+        joblib.dump(model, model_path)
         if verbose:
-            print(f"[classifier] Modelo guardado → {MODEL_PATH}")
+            print(f"[classifier] Modelo guardado -> {model_path}")
 
     return model, metrics
 
@@ -448,7 +506,7 @@ def train_classifier(
 # Carga e inferencia
 # ─────────────────────────────────────────────────────────────────────────────
 
-def load_classifier() -> Optional[Pipeline]:
+def load_classifier(model_path: str = MODEL_PATH) -> Optional[Pipeline]:
     """
     Carga el clasificador entrenado desde disco (joblib).
 
@@ -457,13 +515,13 @@ def load_classifier() -> Optional[Pipeline]:
         Si retorna None, el pipeline de inferencia usará un clasificador
         heurístico como fallback (ver pipeline.py).
     """
-    if not os.path.exists(MODEL_PATH):
+    if not os.path.exists(model_path):
         return None
     try:
-        model: Pipeline = joblib.load(MODEL_PATH)
+        model: Pipeline = joblib.load(model_path)
         return model
     except Exception as exc:
-        print(f"[classifier] Error cargando modelo desde {MODEL_PATH}: {exc}")
+        print(f"[classifier] Error cargando modelo desde {model_path}: {exc}")
         return None
 
 
@@ -492,17 +550,21 @@ def predict_state(
           is_confident          (bool)  : confidence >= CONFIDENCE_THRESHOLD
     """
     X          = feature_vector.reshape(1, -1)
-    probs      = model.predict_proba(X)[0]          # shape (3,)
-    pred_class = int(np.argmax(probs))
-    confidence = float(probs[pred_class])
+    probs = model.predict_proba(X)[0]
+    classes = [int(c) for c in model.classes_]
+    pred_idx = int(np.argmax(probs))
+    pred_class = classes[pred_idx]
+    confidence = float(probs[pred_idx])
+
+    full_probs = {CLASS_LABELS[k]: 0.0 for k in CLASS_LABELS}
+    for label, prob in zip(classes, probs):
+        full_probs[CLASS_LABELS[label]] = round(float(prob), 4)
 
     return {
         "predicted_class":     pred_class,
         "predicted_label":     CLASS_LABELS[pred_class],
         "confidence":          round(confidence, 4),
-        "class_probabilities": {
-            CLASS_LABELS[i]: round(float(p), 4) for i, p in enumerate(probs)
-        },
+        "class_probabilities": full_probs,
         "is_confident":        confidence >= CONFIDENCE_THRESHOLD,
         "method":              "ml_ensemble",
     }
@@ -529,21 +591,29 @@ def _print_training_report(metrics: Dict, y_test, y_pred) -> None:
     print(f"\n  Validación cruzada 5-fold (sobre train set):")
     print(f"    Accuracy: {metrics['cv_mean_accuracy']:.3f} ± {metrics['cv_std_accuracy']:.3f}")
     print(f"    Scores individuales: {[f'{s:.3f}' for s in metrics['cv_scores']]}")
-    print(f"\n  Hold-out test set (20%):")
+    print(f"\n  Hold-out test set:")
     print(f"    Accuracy: {metrics['accuracy']:.3f}")
     print(f"    F1 macro: {metrics['f1_macro']:.3f}")
+    labels_present = metrics.get("labels_present", sorted(int(v) for v in np.unique(y_test)))
+    target_names = [CLASS_LABELS[i] for i in labels_present]
+
     print(f"\n  Reporte por clase:")
     print(
         classification_report(
-            y_test, y_pred,
-            target_names=[CLASS_LABELS[i] for i in range(3)],
+            y_test,
+            y_pred,
+            labels=labels_present,
+            target_names=target_names,
             digits=3,
         )
     )
+
     print(f"  Matriz de confusión (filas=real, columnas=predicho):")
-    print(f"    {'':12s}  {'awake':>8s}  {'induction':>10s}  {'trance':>7s}")
+    header = "    " + " " * 12 + "  " + "  ".join(f"{name:>10s}" for name in target_names)
+    print(header)
     cm = metrics["confusion_matrix"]
-    for i, label in enumerate(["awake", "induction", "trance"]):
-        print(f"    {label:12s}  {cm[i][0]:>8d}  {cm[i][1]:>10d}  {cm[i][2]:>7d}")
+    for row_idx, label_name in enumerate(target_names):
+        row_vals = "  ".join(f"{int(v):>10d}" for v in cm[row_idx])
+        print(f"    {label_name:12s}  {row_vals}")
     print(f"\n  Train: {metrics['n_train']} muestras | Test: {metrics['n_test']} muestras")
     print(sep + "\n")

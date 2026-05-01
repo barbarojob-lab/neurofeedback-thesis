@@ -159,6 +159,8 @@ export interface SessionConfig {
   sigmoidK?: number;
   /** Umbral mínimo de especificidad frontal theta(Fz)/media(theta(F3),theta(F4)) */
   frontalSpecificityThreshold?: number;
+  /** Perfil de sugestionabilidad del sujeto para seleccionar modelo ML */
+  suggestibility?: "high" | "low";
 }
 
 /** Medida subjetiva de estado reportada por el paciente o terapeuta */
