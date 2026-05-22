@@ -7,9 +7,11 @@ clasificación EEG al backend Node.js y al frontend React.
 Endpoints:
   GET  /health          — health check + estado del modelo
   POST /process_window  — procesa una ventana EEG (REST)
-  POST /train           — entrena el clasificador (REST)
   POST /reload_model    — recarga el modelo desde disco sin reiniciar
   WS   /ws              — WebSocket tiempo real para server.ts
+
+  📌 NOTA: El entrenamiento se realiza en Google Colab, no localmente.
+      Descargar el modelo entrenado y colocarlo en data/models_colab/
 
 Integración con server.ts:
   El backend Node.js actúa como cliente WebSocket de este servicio.
@@ -52,8 +54,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 
-from src.classifier import generate_synthetic_training_data, train_classifier
-from src.connectivity import CHANNELS, N_CHANNELS
+from src.connectivity import CHANNELS, N_CHANNELS, WINDOW_SIZE
 from src.pipeline import process_window, reload_model, _get_model
 
 
@@ -93,8 +94,8 @@ class ProcessWindowRequest(BaseModel):
 
     eeg_window:
         Lista de N_CHANNELS listas de flotantes.
-        Cada sublista contiene n_samples (normalmente 512) muestras en µV.
-        Ya debe estar filtrada (notch + bandpass) por el backend Node.js.
+        Cada sublista contiene exactamente 512 muestras en µV.
+        Debe llegar ya re-referenciada en promedio por el backend Node.js.
 
     band_powers_per_channel:
         {canal: {banda: potencia_µV²}}
@@ -107,7 +108,9 @@ class ProcessWindowRequest(BaseModel):
     eeg_window:              list[list[float]]
     band_powers_per_channel: dict[str, dict[str, float]]
     frontal_specificity:     float = 1.0
+    # Campo legado: se mantiene por compatibilidad, pero no afecta la inferencia.
     suggestibility:          str = "high"
+    model_profile_mode:      str = "auto"
 
     @field_validator("eeg_window")
     @classmethod
@@ -117,23 +120,13 @@ class ProcessWindowRequest(BaseModel):
                 f"eeg_window debe tener {N_CHANNELS} canales (filas), "
                 f"recibido: {len(v)}"
             )
+        for idx, row in enumerate(v):
+            if len(row) != WINDOW_SIZE:
+                raise ValueError(
+                    f"eeg_window[{idx}] debe tener {WINDOW_SIZE} muestras, "
+                    f"recibido: {len(row)}"
+                )
         return v
-
-
-class TrainRequest(BaseModel):
-    """
-    Payload para POST /train.
-
-    use_synthetic:
-        True = genera datos sintéticos para demo/validación.
-        En producción, implementar el endpoint con datos reales etiquetados.
-
-    n_synthetic_samples:
-        Número de muestras a generar (divididas en 3 clases).
-        Mínimo recomendado: 600 (200/clase). Default: 1500.
-    """
-    use_synthetic:       bool = True
-    n_synthetic_samples: int  = 1500
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -181,53 +174,11 @@ async def api_process_window(req: ProcessWindowRequest):
             eeg_window=eeg_arr,
             band_powers_per_channel=req.band_powers_per_channel,
             frontal_specificity=req.frontal_specificity,
-            suggestibility=req.suggestibility,
+            model_profile_mode=req.model_profile_mode,
         )
         return result
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@app.post("/train")
-async def api_train(req: TrainRequest):
-    """
-    Entrena el clasificador EEG y lo persiste en disco.
-
-    Con use_synthetic=True: genera datos con distribuciones fisiológicamente
-    realistas para validación de la arquitectura. Para producción, integrar
-    un pipeline de recolección de datos EEG etiquetados.
-
-    El modelo entrenado queda disponible inmediatamente para inferencia
-    en el mismo proceso (sin necesidad de reiniciar el servidor).
-    """
-    try:
-        if req.use_synthetic:
-            X, y = generate_synthetic_training_data(
-                n_samples=req.n_synthetic_samples
-            )
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Para datos reales, extender este endpoint para recibir "
-                    "X (features) e y (etiquetas) como arrays en el body. "
-                    "O usar el script train_classifier.py con --real data.npz"
-                ),
-            )
-
-        model, metrics = train_classifier(X, y, save_model=True, verbose=True)
-
-        # Invalidar caché para que la próxima inferencia use el nuevo modelo
-        reload_model()
-
-        return {
-            "status":  "trained",
-            "metrics": metrics,
-        }
-    except HTTPException:
-        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -301,7 +252,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         eeg_window=eeg_arr,
                         band_powers_per_channel=data.get("band_powers_per_channel", {}),
                         frontal_specificity=float(data.get("frontal_specificity", 1.0)),
-                        suggestibility=str(data.get("suggestibility", "high")),
+                        model_profile_mode=str(data.get("model_profile_mode", "auto")),
                     )
                     await websocket.send_json({
                         "type": "connectivity_result",

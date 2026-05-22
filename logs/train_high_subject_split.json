@@ -1,0 +1,67 @@
+{
+  "group": "high",
+  "random_state": 42,
+  "val_subject_ratio": 0.3333333333333333,
+  "train_subjects": [
+    "subject_01",
+    "subject_02",
+    "subject_03",
+    "subject_04",
+    "subject_05",
+    "subject_06",
+    "subject_07",
+    "subject_08",
+    "subject_09",
+    "subject_10",
+    "subject_13",
+    "subject_14",
+    "subject_15",
+    "subject_16"
+  ],
+  "val_subjects": [
+    "subject_11"
+  ],
+  "n_train_samples": 63759,
+  "n_val_samples": 4752,
+  "class_counts_train": {
+    "awake": 6807,
+    "induction": 52664,
+    "trance": 4288
+  },
+  "class_counts_val": {
+    "awake": 54,
+    "induction": 3753,
+    "trance": 945
+  },
+  "metrics": {
+    "val_accuracy": 0.998526936026936,
+    "val_f1_macro": 0.9955125912922762,
+    "cv_groupkfold_mean_accuracy": 0.9968867409343071,
+    "cv_groupkfold_std_accuracy": 0.0013041819275238327,
+    "high_confidence_pct": 95.26515151515152
+  },
+  "confusion_matrix": {
+    "labels": [
+      "awake",
+      "induction",
+      "trance"
+    ],
+    "matrix": [
+      [
+        53,
+        1,
+        0
+      ],
+      [
+        0,
+        3753,
+        0
+      ],
+      [
+        0,
+        6,
+        939
+      ]
+    ]
+  }
+}

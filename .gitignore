@@ -1,19 +1,18 @@
-# =========================
-# Monorepo: Node + Python
-# =========================
+# ==========================================
+# tesis - Neurofeedback (Node + Python)
+# ==========================================
 
-# Node / JS / TS dependencies
+# ---------- Node / JS / TS ----------
 node_modules/
 *.pnp
 .pnp.js
+*.tsbuildinfo
 
-# Python virtual environments
+# ---------- Python env / cache ----------
 .venv/
 venv/
 env/
 ml-service/.venv/
-
-# Python cache / build artifacts
 __pycache__/
 *.py[cod]
 *.pyo
@@ -30,30 +29,22 @@ __pycache__/
 htmlcov/
 .ipynb_checkpoints/
 
-# Test coverage
-coverage/
-*.lcov
-
-# Build outputs
+# ---------- Build outputs ----------
 dist/
 dist-ssr/
 build/
 out/
 backend/dist/
 frontend/dist/
-
-# Framework leftovers
 /.next/
-/out/
 /nextinfo.json
 
-# Environment files
+# ---------- Environment / secrets ----------
 .env
 .env.*
 !.env.example
 
-# Logs
-logs/
+# ---------- Logs ----------
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -61,28 +52,29 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-# Runtime data
+# Keep thesis split reports versionable
+!logs/
+!logs/train_*_subject_split.json
+
+# ---------- Runtime files ----------
 pids/
 *.pid
 *.seed
 *.pid.lock
 
-# Downloaded datasets
+# ---------- Datasets and heavy artifacts ----------
 data/yoga_eeg/
 EEG/data/
-
-# Raw EEG recordings — archivos binarios grandes (no versionar)
 data/ICApruned_highs/
 data/ICApruned_lows/
-
-# Generated training artifacts (reproducible via scripts)
 data/sessions.npz
 data/sessions_icapruned.npz
 data/sub-*.edf
 data/*.edf
+data/models_colab/
 ml-service/models/
 
-# IDE/editor
+# ---------- IDE ----------
 .vscode/*
 !.vscode/extensions.json
 .idea/
@@ -93,9 +85,9 @@ ml-service/models/
 *.njsproj
 *.sln
 
-# OS files
+# ---------- OS ----------
 .DS_Store
 Thumbs.db
 
-# TypeScript
-*.tsbuildinfo
+# ---------- Local helper state ----------
+.sixth/

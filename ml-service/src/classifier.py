@@ -82,12 +82,21 @@ CLASS_DESCRIPTIONS: Dict[int, str] = {
 # de la etiqueta de clase.
 CONFIDENCE_THRESHOLD = 0.50
 
+# ─── Umbrales heurísticos (fallback cuando no hay modelo) ────────────────────────────
+# Calibrados con P20 del dataset MIBD: ~20% awake, ~60% induction, ~20% trance
+TBR_TRANCE_HEUR = 2.0
+COH_TRANCE_HEUR = 0.70
+TBR_INDUCTION_HEUR = 0.45
+COH_INDUCTION_HEUR = 0.45
+
 # Directorio y rutas de persistencia del modelo
-_THIS_DIR   = os.path.dirname(__file__)
-MODEL_DIR   = os.path.join(_THIS_DIR, "..", "models")
-MODEL_PATH  = os.path.join(MODEL_DIR, "eeg_classifier.joblib")
+_THIS_DIR = os.path.dirname(__file__)
+MODEL_DIR = os.path.abspath(os.path.join(_THIS_DIR, "..", "..", "data", "models_colab"))
+
+MODEL_PATH = os.path.join(MODEL_DIR, "eeg_classifier.joblib")
 MODEL_PATH_HIGH = os.path.join(MODEL_DIR, "eeg_classifier_high.joblib")
 MODEL_PATH_LOW = os.path.join(MODEL_DIR, "eeg_classifier_low.joblib")
+MODEL_PATH_UNIFIED = os.path.join(MODEL_DIR, "eeg_classifier_unified.joblib")
 
 # Número de features del vector de entrada
 N_FEATURES = 15

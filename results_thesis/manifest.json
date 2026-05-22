@@ -1,0 +1,14 @@
+{
+  "generated_at": "2026-05-21T23:11:00",
+  "source_reports": {
+    "high": "D:\\Proyectos\\Tesis\\neurofeedback-thesis\\logs\\train_high_subject_split.json",
+    "low": "D:\\Proyectos\\Tesis\\neurofeedback-thesis\\logs\\train_low_subject_split.json",
+    "unified": "D:\\Proyectos\\Tesis\\neurofeedback-thesis\\logs\\train_unified_subject_split.json"
+  },
+  "outputs": [
+    "D:\\Proyectos\\Tesis\\neurofeedback-thesis\\results_thesis\\summary_metrics.csv",
+    "D:\\Proyectos\\Tesis\\neurofeedback-thesis\\results_thesis\\class_metrics.csv",
+    "D:\\Proyectos\\Tesis\\neurofeedback-thesis\\results_thesis\\thesis_table.tex",
+    "D:\\Proyectos\\Tesis\\neurofeedback-thesis\\results_thesis\\interpretation_notes.txt"
+  ]
+}

@@ -42,7 +42,7 @@ async function parseEdfMetadata(filePath: string): Promise<DatasetMetadata> {
     }
 
     // samplesPerRecord por canal está en el bloque 9 de la cabecera variable.
-    const samplesPerRecordOffset = ns * (16 + 80 + 8 + 8 + 8 + 8 + 80);
+    const samplesPerRecordOffset = ns * (16 + 80 + 8 + 8 + 8 + 8 + 8 + 80);
     const samplesPerRecordByChannel: number[] = [];
     for (let i = 0; i < ns; i++) {
       const start = samplesPerRecordOffset + i * 8;

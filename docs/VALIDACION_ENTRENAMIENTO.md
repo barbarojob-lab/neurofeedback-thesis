@@ -55,9 +55,33 @@ Estos archivos registran comandos, distribucion de clases, CV, test hold-out, me
 
 Modelos generados/actualizados:
 
-- `ml-service/models/eeg_classifier_high.joblib`
-- `ml-service/models/eeg_classifier_low.joblib`
+- `data/models_colab/eeg_classifier_high.joblib`
+- `data/models_colab/eeg_classifier_low.joblib`
 
 ## 7. Conclusion
 
 La validacion con mitad para entrenamiento y mitad para prueba por sujeto ya esta implementada y ejecutada. Los logs sirven como evidencia tecnica y metodologica para reproducibilidad y defensa academica.
+
+## 8. Trazabilidad del remapeo de canales para EDF de prueba
+
+Para la prueba en tiempo real con backend (modo hardware con dataset), el EDF debe exponer 13 canales:
+
+- Fz, Fp1, Fp2, F3, F4, C3, Cz, C4, P3, Pz, P4, O1, O2
+
+Los archivos ICApruned de origen usan nomenclatura alternativa (F7/F8, OZ, PO3, PO4). Para compatibilidad operacional se aplico remapeo de etiquetas en exportacion EDF sin sintetizar muestras.
+
+Equivalencias usadas:
+
+- F7 -> Fp1
+- F8 -> Fp2
+- PO3 -> O1
+- PO4 -> O2
+- FZ -> Fz
+- PZ -> Pz
+- CZ -> Cz
+
+Importante:
+
+- No se uso zero-padding ni interpolacion para crear canales faltantes.
+- La señal exportada proviene de canales medidos en el registro original.
+- Si un canal requerido no existe en el archivo fuente, la exportacion falla para evitar introducir sesgo analitico.

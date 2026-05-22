@@ -161,6 +161,8 @@ export interface SessionConfig {
   frontalSpecificityThreshold?: number;
   /** Perfil de sugestionabilidad del sujeto para seleccionar modelo ML */
   suggestibility?: "high" | "low";
+  /** Modo de inferencia ML: auto (mejor confianza) o perfil forzado */
+  modelProfileMode?: "auto" | "high" | "low";
 }
 
 /** Medida subjetiva de estado reportada por el paciente o terapeuta */
@@ -186,7 +188,7 @@ export interface ClassifierPrediction {
   /** Estado predicho: 0=awake, 1=induction, 2=trance */
   predicted_class: number;
   /** Etiqueta legible del estado */
-  predicted_label: "awake" | "induction" | "trance";
+  predicted_label: "awake" | "induction" | "trance" | "uncertain";
   /** Confianza de la predicción [0, 1] */
   confidence: number;
   /** Probabilidades por clase [normalizado a suma ≈ 1] */
@@ -197,8 +199,12 @@ export interface ClassifierPrediction {
   };
   /** true cuando confidence >= 0.50 */
   is_confident: boolean;
-  /** Método usado: 'ml_ensemble' o 'heuristic_fallback' */
-  method: "ml_ensemble" | "heuristic_fallback";
+  /** Método usado: 'ml_ensemble', 'ml_fused' o 'heuristic_fallback' */
+  method: "ml_ensemble" | "ml_fused" | "heuristic_fallback";
+  /** Perfil de modelo seleccionado en inferencia desacoplada (opcional) */
+  model_profile?: "high" | "low";
+  /** Estrategia de selección usada cuando aplica (opcional) */
+  selection_method?: string;
 }
 
 /** Conectividad y features del ML service */
@@ -222,6 +228,13 @@ export interface MLServiceResult {
   connectivity_features: ConnectivityFeatures;
   classifier_prediction: ClassifierPrediction;
   feature_vector: number[];
+  stage_timings_ms?: {
+    preprocess_ms: number;
+    coherence_ms: number;
+    plv_ms: number;
+    feature_ms: number;
+    model_ms: number;
+  };
   processing_ms: number;
 }
 
@@ -258,6 +271,13 @@ export interface FeedbackPayload {
   state_prediction: ClassifierPrediction | null;
   // ✅ NUEVO: Resultados de conectividad y ML
   connectivity    : MLServiceResult | null;
+  playback        : PlaybackInfo | null;
+  /** Desglose de tiempos internos del pipeline DSP en Node.js [ms] */
+  pipelineStageMs?: {
+    referenceAndFilterMs: number;
+    spectralAndFeatureMs: number;
+    totalMs: number;
+  };
   /** Tiempo de procesamiento del epoch en el servidor [ms] — debe ser < 5 ms */
   pipelineMs      : number;
 }
@@ -272,6 +292,11 @@ export interface DatasetMetadata {
   totalSamples: number;
 }
 
+export interface PlaybackInfo {
+  positionSec: number;
+  durationSec: number;
+}
+
 export interface ServerHelloMessage {
   type       : "server_hello";
   version    : string;
@@ -279,6 +304,7 @@ export interface ServerHelloMessage {
   windowSize : number;
   hopSize    : number;
   dataset?   : DatasetMetadata | null;
+  playback?  : PlaybackInfo | null;
   session    : { id: string; tranceMode: boolean } | null;
 }
 
@@ -314,6 +340,13 @@ export interface InspectionChannelSetMessage {
 export interface DatasetLoadedMessage {
   type    : "dataset_loaded";
   dataset : DatasetMetadata;
+  playback?: PlaybackInfo | null;
+}
+
+export interface PlaybackPositionSetMessage {
+  type       : "playback_position_set";
+  positionSec: number;
+  durationSec: number;
 }
 
 export interface ServerErrorMessage {
@@ -332,6 +365,7 @@ export type ServerMessage =
   | TranceModSetMessage
   | InspectionChannelSetMessage
   | DatasetLoadedMessage
+  | PlaybackPositionSetMessage
   | ServerErrorMessage;
 
 // ---------------------------------------------------------------------------
@@ -344,6 +378,7 @@ export type WSMessage =
   | { type: "set_trance_mode";   payload: { enabled: boolean }}
   | { type: "set_inspection_channel"; payload: { channel: string }}
   | { type: "load_dataset"; payload: { path: string }}
+  | { type: "set_playback_position"; payload: { seconds: number }}
   | { type: "ping"                                            }
   | { type: "submit_subjective"; payload: SubjectiveMeasure   };
 
@@ -472,3 +507,15 @@ export function isDatasetLoaded(msg: unknown): msg is DatasetLoadedMessage {
 
   return obj.type === "dataset_loaded" && asObject(obj.dataset) !== null;
 }
+
+export function isPlaybackPositionSet(msg: unknown): msg is PlaybackPositionSetMessage {
+  const obj = asObject(msg);
+  if (!obj) return false;
+
+  return (
+    obj.type === "playback_position_set" &&
+    typeof obj.positionSec === "number" &&
+    typeof obj.durationSec === "number"
+  );
+}
+

@@ -8,7 +8,7 @@
 import { useEffect, useState } from "react";
 
 export interface StateClassifierProps {
-  label: "awake" | "induction" | "trance" | null;
+  label: "awake" | "induction" | "trance" | "uncertain" | null;
   confidence: number;  // 0–1
   timestamp?: number;  // cuando se hizo la predicción
 }
@@ -32,7 +32,7 @@ export default function StateClassifier({
   }, [timestamp]);
 
   const stateInfo: Record<
-    "awake" | "induction" | "trance" | "calibrating",
+    "awake" | "induction" | "trance" | "uncertain" | "calibrating",
     { emoji: string; label: string; color: string; description: string }
   > = {
     awake: {
@@ -52,6 +52,12 @@ export default function StateClassifier({
       label: "TRANCE",
       color: "#00e676",
       description: "Deep theta activity detected",
+    },
+    uncertain: {
+      emoji: "◌",
+      label: "UNCERTAIN",
+      color: "#90a4ae",
+      description: "Models disagree or confidence is low",
     },
     calibrating: {
       emoji: "⏳",

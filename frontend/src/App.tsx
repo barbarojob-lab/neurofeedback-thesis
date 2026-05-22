@@ -31,35 +31,27 @@ import React, {
   useCallback,
   useId,
   useEffect,
+  useMemo,
 } from "react";
 
-import WaveformChart    from "./components/WaveformChart";
 import ThetaBetaGauge   from "./components/ThetaBetaGauge";
 import BandPowerBars    from "./components/BandPowerBars";
-import TopographyMap    from "./components/TopographyMap";
-import ChannelInspectionPanel from "./components/ChannelInspectionPanel";
 // ✅ NUEVOS: Componentes del clasificador
 import StateClassifier  from "./components/StateClassifier";
-import ConfidenceGauge  from "./components/ConfidenceGauge";
-import ProbabilityMatrix from "./components/ProbabilityMatrix";
 import { useEEGSocket } from "./hooks/useEEGSocket";
 import {
   useEEGStore,
   selectPipelineMs,
   selectLastError,
-  selectFrontalSpecificity,
-  selectFrontalSpecificityValid,
-  selectArtifactDetected,
   selectStatePrediction,
 } from "./store/eegStore";
 
-import type { SessionConfig, DatasetMetadata } from "./types";
+import type { SessionConfig, DatasetMetadata, PlaybackInfo } from "./types";
 
 // ---------------------------------------------------------------------------
 // Constantes
 // ---------------------------------------------------------------------------
 
-const SAMPLE_RATE = 250;
 const EEG_CHANNEL_OPTIONS = ["Fz", "Fp1", "Fp2", "F3", "F4", "C3", "Cz", "C4", "P3", "Pz", "P4", "O1", "O2"];
 
 // ---------------------------------------------------------------------------
@@ -135,6 +127,7 @@ function StatePredictionBadge() {
     awake: "#ff5252",
     induction: "#ffc400",
     trance: "#00e676",
+    uncertain: "#90a4ae",
   };
 
   const label = prediction.predicted_label.toUpperCase();
@@ -194,36 +187,32 @@ function PipelineLatency() {
 interface ControlPanelProps {
   isConnected       : boolean;
   isSessionActive   : boolean;
-  sessionId         : string | null;
   onStart           : (cfg: SessionConfig) => void;
   onStop            : () => void;
-  onTranceToggle    : (enabled: boolean) => void;
-  onSubmitNRS       : (sessionId: string, value: number) => void;
   onPing            : () => void;
   inspectionChannel : string;
   onInspectionChannelChange: (channel: string) => void;
   onLoadDataset: (path: string) => void;
+  onSetPlaybackPosition: (seconds: number) => void;
   dataset: DatasetMetadata | null;
+  playback: PlaybackInfo | null;
 }
 
 function ControlPanel({
   isConnected,
   isSessionActive,
-  sessionId,
   onStart,
   onStop,
-  onTranceToggle,
-  onSubmitNRS,
   onPing,
   inspectionChannel,
   onInspectionChannelChange,
   onLoadDataset,
+  onSetPlaybackPosition,
   dataset,
+  playback,
 }: ControlPanelProps) {
   const [patientId,    setPatientId]    = useState("");
   const [group,        setGroup]        = useState<"experimental" | "control">("experimental");
-  const [suggestibility, setSuggestibility] = useState<"high" | "low">("high");
-  const [tranceMode,   setTranceModeLocal] = useState(false);
   const [sigmoidK,     setSigmoidK]     = useState(2.0);
   const [thetaThresh,  setThetaThresh]  = useState(0.0);
   const [datasetPath, setDatasetPath] = useState("");
@@ -231,25 +220,28 @@ function ControlPanel({
   const [datasetQuery, setDatasetQuery] = useState("");
   const [loadingDatasets, setLoadingDatasets] = useState(false);
   const [datasetsError, setDatasetsError] = useState<string | null>(null);
+  const [seekSecondsInput, setSeekSecondsInput] = useState("0");
 
   const patientIdId = useId();
   const groupId     = useId();
 
+  const inferModelProfileMode = useCallback((): "auto" | "high" | "low" => {
+    const source = (dataset?.sourcePath ?? datasetPath).toLowerCase();
+    if (source.includes("_high") || source.includes("high")) return "high";
+    if (source.includes("_low") || source.includes("low")) return "low";
+    return "auto";
+  }, [dataset?.sourcePath, datasetPath]);
+
   const handleStart = useCallback(() => {
+    const modelProfileMode = inferModelProfileMode();
     const config: SessionConfig = {
       thetaThreshold        : thetaThresh,
       thetaPeakTbrThreshold : 2.5,
       sigmoidK,
-      suggestibility,
+      modelProfileMode,
     };
     onStart(config);
-  }, [onStart, thetaThresh, sigmoidK, suggestibility]);
-
-  const handleTranceToggle = useCallback(() => {
-    const next = !tranceMode;
-    setTranceModeLocal(next);
-    onTranceToggle(next);
-  }, [tranceMode, onTranceToggle]);
+  }, [onStart, thetaThresh, sigmoidK, inferModelProfileMode]);
 
   const refreshDatasets = useCallback(async () => {
     setLoadingDatasets(true);
@@ -294,6 +286,24 @@ function ControlPanel({
       setDatasetPath(filteredDatasetOptions[0] ?? "");
     }
   }, [filteredDatasetOptions, datasetPath]);
+
+  useEffect(() => {
+    if (!playback) return;
+    setSeekSecondsInput(String(Math.round(playback.positionSec)));
+  }, [playback?.durationSec]);
+
+  const clampedPlaybackSeconds = useMemo(() => {
+    if (!playback) return 0;
+    return Math.max(0, Math.min(playback.durationSec, playback.positionSec));
+  }, [playback]);
+
+  const seekToInput = useCallback(() => {
+    if (!playback) return;
+    const parsed = Number(seekSecondsInput);
+    if (!Number.isFinite(parsed)) return;
+    const bounded = Math.max(0, Math.min(playback.durationSec, parsed));
+    onSetPlaybackPosition(bounded);
+  }, [onSetPlaybackPosition, playback, seekSecondsInput]);
 
   const inputStyle: React.CSSProperties = {
     width           : "100%",
@@ -368,18 +378,6 @@ function ControlPanel({
         >
           <option value="experimental">Experimental (NF activo)</option>
           <option value="control">Control (NF sham)</option>
-        </select>
-      )}
-
-      {field("SUGESTIONABILIDAD",
-        <select
-          value={suggestibility}
-          onChange={(e) => setSuggestibility(e.target.value as "high" | "low")}
-          disabled={isSessionActive}
-          style={inputStyle}
-        >
-          <option value="high">Alta (high)</option>
-          <option value="low">Baja (low)</option>
         </select>
       )}
 
@@ -545,6 +543,90 @@ function ControlPanel({
         </div>
       )}
 
+      {playback && (
+        <div style={{
+          padding: "10px",
+          borderRadius: 6,
+          marginBottom: 10,
+          background: "rgba(255,255,255,0.04)",
+          border: "1px solid rgba(255,255,255,0.12)",
+          display: "grid",
+          gap: 8,
+        }}>
+          <div style={{
+            fontFamily: "'JetBrains Mono', monospace",
+            fontSize: 9,
+            color: "rgba(255,255,255,0.6)",
+            letterSpacing: "0.08em",
+          }}>
+            NAVEGACION TEMPORAL
+          </div>
+
+          <input
+            type="range"
+            min={0}
+            max={Math.max(1, playback.durationSec)}
+            step={1}
+            value={clampedPlaybackSeconds}
+            onChange={(e) => {
+              const next = Number(e.target.value);
+              setSeekSecondsInput(String(Math.round(next)));
+              onSetPlaybackPosition(next);
+            }}
+            style={{ width: "100%", accentColor: "#00e5ff" }}
+          />
+
+          <div style={{
+            display: "grid",
+            gridTemplateColumns: "1fr auto auto",
+            gap: 6,
+            alignItems: "center",
+          }}>
+            <input
+              type="number"
+              min={0}
+              max={Math.max(1, playback.durationSec)}
+              step={1}
+              value={seekSecondsInput}
+              onChange={(e) => setSeekSecondsInput(e.target.value)}
+              style={inputStyle}
+            />
+            <button
+              onClick={seekToInput}
+              style={{
+                padding: "7px 10px",
+                borderRadius: 5,
+                border: "none",
+                cursor: "pointer",
+                backgroundColor: "rgba(0,229,255,0.16)",
+                color: "#00e5ff",
+                fontFamily: "'JetBrains Mono', monospace",
+                fontSize: 10,
+                letterSpacing: "0.08em",
+              }}
+            >
+              IR
+            </button>
+            <button
+              onClick={() => onSetPlaybackPosition(0)}
+              style={{
+                padding: "7px 10px",
+                borderRadius: 5,
+                border: "none",
+                cursor: "pointer",
+                backgroundColor: "rgba(255,255,255,0.1)",
+                color: "rgba(255,255,255,0.8)",
+                fontFamily: "'JetBrains Mono', monospace",
+                fontSize: 10,
+                letterSpacing: "0.08em",
+              }}
+            >
+              INICIO
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Botón principal: Iniciar / Detener */}
       <button
         onClick={isSessionActive ? onStop : handleStart}
@@ -577,57 +659,6 @@ function ControlPanel({
       >
         {isSessionActive ? "■  DETENER SESIÓN" : "▶  INICIAR SESIÓN"}
       </button>
-
-      {/* Modo trance — solo disponible con sesión activa */}
-      {isSessionActive && (
-        <button
-          onClick={handleTranceToggle}
-          style={{
-            marginTop      : 8,
-            width          : "100%",
-            padding        : "7px 0",
-            borderRadius   : 5,
-            border         : "none",
-            cursor         : "pointer",
-            backgroundColor: tranceMode
-              ? "rgba(0,230,118,0.15)"
-              : "rgba(255,255,255,0.05)",
-            color          : tranceMode ? "#00e676" : "rgba(255,255,255,0.4)",
-            fontFamily     : "'JetBrains Mono', monospace",
-            fontSize       : 10,
-            letterSpacing  : "0.1em",
-            outline        : `1px solid ${tranceMode ? "rgba(0,230,118,0.3)" : "rgba(255,255,255,0.1)"}`,
-            transition     : "all 0.2s",
-          } as React.CSSProperties}
-        >
-          {tranceMode ? "◈  MODO TRANCE  ON" : "◇  MODO TRANCE  OFF"}
-        </button>
-      )}
-
-      {/* NRS-T (Numeric Rating Scale — Trance) */}
-      {isSessionActive && (
-        <button
-          onClick={() => onSubmitNRS(sessionId ?? "", 7)}
-          style={{
-            marginTop      : 8,
-            width          : "100%",
-            padding        : "7px 0",
-            borderRadius   : 5,
-            border         : "none",
-            cursor         : "pointer",
-            backgroundColor: "rgba(255,214,0,0.1)",
-            color          : "#ffd600",
-            fontFamily     : "'JetBrains Mono', monospace",
-            fontSize       : 10,
-            letterSpacing  : "0.1em",
-            outline        : "1px solid rgba(255,214,0,0.25)",
-            transition     : "all 0.2s",
-          } as React.CSSProperties}
-          title="Enviar medida subjetiva NRS-T (demo valor=7)"
-        >
-          ◎  NRS-T (demo)
-        </button>
-      )}
 
       {/* Ping — diagnóstico de latencia WS */}
       <button
@@ -689,69 +720,7 @@ function ControlPanel({
   );
 }
 
-function ValidationPanel() {
-  const frontalSpecificity = useEEGStore(selectFrontalSpecificity);
-  const frontalValid = useEEGStore(selectFrontalSpecificityValid);
-  const artifact = useEEGStore(selectArtifactDetected);
-
-  const cellStyle: React.CSSProperties = {
-    padding: "8px 10px",
-    borderRadius: 6,
-    border: "1px solid rgba(255,255,255,0.12)",
-    fontFamily: "'JetBrains Mono', monospace",
-    fontSize: 10,
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: 10,
-  };
-
-  return (
-    <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
-      <div style={{
-        fontSize: 9,
-        fontFamily: "'JetBrains Mono', monospace",
-        letterSpacing: "0.12em",
-        color: "rgba(255,255,255,0.3)",
-      }}>
-        VALIDACION DE SEGMENTO
-      </div>
-
-      <div style={{
-        ...cellStyle,
-        background: frontalValid ? "rgba(0,230,118,0.1)" : "rgba(255,82,82,0.1)",
-        borderColor: frontalValid ? "rgba(0,230,118,0.25)" : "rgba(255,82,82,0.25)",
-      }}>
-        <span>Especificidad frontal</span>
-        <span style={{ color: frontalValid ? "#00e676" : "#ff5252" }}>
-          {frontalValid ? "VALIDA" : "INVALIDA"}
-        </span>
-      </div>
-
-      <div style={{
-        ...cellStyle,
-        background: artifact ? "rgba(255,82,82,0.1)" : "rgba(0,229,255,0.1)",
-        borderColor: artifact ? "rgba(255,82,82,0.25)" : "rgba(0,229,255,0.25)",
-      }}>
-        <span>Artefacto ocular</span>
-        <span style={{ color: artifact ? "#ff5252" : "#00e5ff" }}>
-          {artifact ? "CONTAMINADO" : "LIMPIO"}
-        </span>
-      </div>
-
-      <div style={{
-        ...cellStyle,
-        background: "rgba(255,255,255,0.03)",
-        borderColor: "rgba(255,255,255,0.1)",
-      }}>
-        <span>Fz / media(F3,F4)</span>
-        <span style={{ color: "#ffd600" }}>{frontalSpecificity.toFixed(2)}</span>
-      </div>
-    </div>
-  );
-}
-
-// ========== Panels para los nuevos componentes del clasificador ==========
+// ========== Panels para los componentes principales ==========
 
 function StateClassifierPanel() {
   const prediction = useEEGStore(selectStatePrediction);
@@ -760,29 +729,6 @@ function StateClassifierPanel() {
     <StateClassifier
       label={prediction?.predicted_label ?? null}
       confidence={prediction?.confidence ?? 0}
-      timestamp={prediction ? Date.now() : undefined}
-    />
-  );
-}
-
-function ConfidenceGaugePanel() {
-  const prediction = useEEGStore(selectStatePrediction);
-  
-  return (
-    <ConfidenceGauge
-      confidence={prediction?.confidence ?? 0}
-    />
-  );
-}
-
-function ProbabilityMatrixPanel() {
-  const prediction = useEEGStore(selectStatePrediction);
-  
-  return (
-    <ProbabilityMatrix
-      awake={prediction?.class_probabilities.awake ?? 0}
-      induction={prediction?.class_probabilities.induction ?? 0}
-      trance={prediction?.class_probabilities.trance ?? 0}
     />
   );
 }
@@ -799,15 +745,14 @@ export default function App() {
     sendMessage,
     startSession,
     stopSession,
-    setTranceMode,
-    submitSubjective,
     setInspectionChannel,
     loadDataset,
     dataset,
+    playback,
+    setPlaybackPosition,
   } = useEEGSocket();
 
   const lastError = useEEGStore(selectLastError);
-  const sessionId = useEEGStore((s) => s.sessionId);
   const inspectionChannel = useEEGStore((s) => s.inspectionChannel);
 
   return (
@@ -897,22 +842,58 @@ export default function App() {
         </div>
       </header>
 
-      {/* ── WAVEFORM (ancho completo) ────────────────────────────────────── */}
+      {/* ── Panel superior (navegacion temporal) ───────────────────────── */}
       <section style={{
         backgroundColor: "#0d0d1a",
         borderRadius   : 8,
         border         : "1px solid rgba(255,255,255,0.07)",
         padding        : "12px 14px",
       }}>
-        <WaveformChart sampleRate={SAMPLE_RATE} height={200} />
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: "auto 1fr auto",
+          alignItems: "center",
+          gap: 12,
+        }}>
+          <div style={{
+            fontSize: 10,
+            color: "rgba(255,255,255,0.45)",
+            letterSpacing: "0.1em",
+          }}>
+            REPRODUCCION DATASET
+          </div>
+          <div style={{
+            height: 10,
+            borderRadius: 999,
+            background: "rgba(255,255,255,0.09)",
+            overflow: "hidden",
+          }}>
+            <div style={{
+              width: playback && playback.durationSec > 0
+                ? `${Math.min(100, Math.max(0, (playback.positionSec / playback.durationSec) * 100))}%`
+                : "0%",
+              height: "100%",
+              background: "linear-gradient(90deg, #00e5ff, #2ef5c8)",
+              transition: "width 0.15s linear",
+            }} />
+          </div>
+          <div style={{
+            fontSize: 10,
+            color: "rgba(255,255,255,0.8)",
+            minWidth: 120,
+            textAlign: "right",
+          }}>
+            {playback
+              ? `${playback.positionSec.toFixed(1)}s / ${playback.durationSec.toFixed(1)}s`
+              : "Sin dataset"}
+          </div>
+        </div>
       </section>
-
-      <ChannelInspectionPanel />
 
       {/* ── FILA INFERIOR: Clasificador + Visualizaciones ──────────────────── */}
       <div style={{
         display             : "grid",
-        gridTemplateColumns : "180px 180px 200px 1fr 260px",
+        gridTemplateColumns : "180px 1fr 260px",
         gap                 : 12,
         flex                : 1,
         minHeight           : 0,
@@ -931,33 +912,7 @@ export default function App() {
           <StateClassifierPanel />
         </section>
 
-        {/* Panel 2 — Confidence Gauge */}
-        <section style={{
-          backgroundColor: "#0d0d1a",
-          borderRadius   : 8,
-          border         : "1px solid rgba(255,255,255,0.07)",
-          padding        : "12px",
-          display        : "flex",
-          alignItems     : "center",
-          justifyContent : "center",
-        }}>
-          <ConfidenceGaugePanel />
-        </section>
-
-        {/* Panel 3 — Probability Matrix */}
-        <section style={{
-          backgroundColor: "#0d0d1a",
-          borderRadius   : 8,
-          border         : "1px solid rgba(255,255,255,0.07)",
-          padding        : "12px",
-          display        : "flex",
-          alignItems     : "center",
-          justifyContent : "center",
-        }}>
-          <ProbabilityMatrixPanel />
-        </section>
-
-        {/* Panel 4 — Band Power + ThetaBeta */}
+        {/* Panel 2 — Band Power + ThetaBeta */}
         <div style={{
           display: "grid",
           gridTemplateRows: "1fr 1fr",
@@ -988,29 +943,20 @@ export default function App() {
           </section>
         </div>
 
-        {/* Panel 5 — Control + Topography */}
+        {/* Panel 3 — Control */}
         <section style={{ minHeight: 0 }}>
           <ControlPanel
             isConnected={isConnected}
             isSessionActive={isSessionActive}
-            sessionId={sessionId}
             onStart={startSession}
             onStop={stopSession}
-            onTranceToggle={setTranceMode}
-            onSubmitNRS={(sid, value) =>
-              submitSubjective({
-                sessionId : sid,
-                timestamp : Date.now(),
-                label     : "nrs-t-demo",
-                value,
-                notes     : "Demo subjective measure",
-              })
-            }
             onPing={() => sendMessage({ type: "ping" })}
             inspectionChannel={inspectionChannel}
             onInspectionChannelChange={setInspectionChannel}
             onLoadDataset={loadDataset}
+            onSetPlaybackPosition={setPlaybackPosition}
             dataset={dataset}
+            playback={playback}
           />
         </section>
       </div>
@@ -1023,7 +969,7 @@ export default function App() {
         letterSpacing: "0.1em",
         paddingTop   : 4,
       }}>
-        Filtros: Notch 50 Hz · Butterworth BP 1–30 Hz · FFT 256pt · Welford Z-Score · Sigmoid feedback
+        Filtros: Notch 50 Hz · Butterworth BP 1–30 Hz · FFT 256pt · Welford Z-Score
       </footer>
     </div>
   );

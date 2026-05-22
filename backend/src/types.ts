@@ -316,6 +316,13 @@ export interface FeedbackPayload {
    *   audioEngine.setVolume(command.intensity);  // si action !== 'neutral'
    */
   command: FeedbackCommand;
+  
+    /** Desglose de tiempos internos del pipeline DSP en Node.js [ms] */
+    pipelineStageMs?: {
+      referenceAndFilterMs: number;
+      spectralAndFeatureMs: number;
+      totalMs: number;
+    };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -367,6 +374,8 @@ export interface SessionConfig {
 
   /** Perfil de sugestionabilidad usado para seleccionar el modelo ML de estado */
   suggestibility?: "high" | "low";
+  /** Modo de inferencia del clasificador ML: auto o perfil forzado */
+  modelProfileMode?: "auto" | "high" | "low";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

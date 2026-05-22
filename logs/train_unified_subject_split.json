@@ -1,0 +1,57 @@
+{
+  "group": "unified",
+  "random_state": 42,
+  "val_subject_ratio": 0.33,
+  "train_subjects": [
+    "high_subject_01",
+    "high_subject_02",
+    "high_subject_03",
+    "high_subject_04",
+    "high_subject_05",
+    "high_subject_06",
+    "high_subject_07",
+    "high_subject_08",
+    "high_subject_09",
+    "high_subject_10",
+    "high_subject_13",
+    "high_subject_14",
+    "high_subject_15",
+    "high_subject_16",
+    "low_subject_17",
+    "low_subject_18",
+    "low_subject_20",
+    "low_subject_21",
+    "low_subject_22",
+    "low_subject_23",
+    "low_subject_24",
+    "low_subject_25",
+    "low_subject_26",
+    "low_subject_27",
+    "low_subject_28",
+    "low_subject_29",
+    "low_subject_30",
+    "low_subject_31"
+  ],
+  "val_subjects": [
+    "high_subject_11",
+    "low_subject_19"
+  ],
+  "n_train_samples": 127039,
+  "n_val_samples": 9331,
+  "class_counts_train": {
+    "awake": 11259,
+    "induction": 99557,
+    "trance": 16223
+  },
+  "class_counts_val": {
+    "awake": 204,
+    "induction": 7520,
+    "trance": 1607
+  },
+  "metrics": {
+    "val_accuracy": 0.9936769906762405,
+    "val_f1_macro": 0.9675268933362243,
+    "cv_groupkfold_mean_accuracy": null,
+    "cv_groupkfold_std_accuracy": null
+  }
+}

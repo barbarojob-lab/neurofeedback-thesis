@@ -1,0 +1,12 @@
+THESIS RESULT INTERPRETATION NOTES
+================================
+
+HIGH: acc=0.9985, f1_macro=0.9955, CI95=[0.9970, 0.9993]
+LOW: acc=0.9889, f1_macro=0.9461, CI95=[0.9854, 0.9915]
+UNIFIED: acc=0.9937, f1_macro=0.9675, CI95=[0.9919, 0.9951]
+
+Suggested thesis argument line:
+The subject-wise held-out evaluation suggests that the model generalizes to unseen subjects, with consistently high validation accuracy and macro-F1 across suggestibility groups.
+
+Risk/limitation to report:
+Validation currently uses one forced held-out subject per group in separate models (HIGH/LOW); future work should include repeated subject-wise splits or leave-one-subject-out evaluation.

@@ -57,10 +57,9 @@ import { subscribeWithSelector } from "zustand/middleware";
 
 import type {
   BandPowers,
-  FeedbackCommand,
   SessionConfig,
-  ZScoreResult,
   FeedbackPayload,
+  ClassifierPrediction,
 } from "../types";
 
 // ---------------------------------------------------------------------------
@@ -119,15 +118,7 @@ export interface EEGState {
   /** Ratio theta/beta del último epoch (0 durante warm-up) */
   thetaBetaRatio : number;
   /** ✅ NUEVO: Predicción de estado del clasificador */
-  state_prediction: {
-    predicted_label: "awake" | "induction" | "trance";
-    confidence: number;  // 0–1
-    class_probabilities: {
-      awake: number;
-      induction: number;
-      trance: number;
-    };
-  } | null;
+  state_prediction: ClassifierPrediction | null;
   /** Tiempo de procesamiento del último epoch en el servidor [ms] */
   pipelineMs     : number;
   /** Ratio theta(Fz) / media theta(F3,F4) */
@@ -366,6 +357,7 @@ export const selectWaveformBuffer  = (s: EEGState) => s.waveformBuffer;
 export const selectBandPowers      = (s: EEGState) => s.bandPowers;
 export const selectSessionMaxBandPowers = (s: EEGState) => s.sessionMaxBandPowers;
 export const selectThetaBetaRatio  = (s: EEGState) => s.thetaBetaRatio;
+export const selectZScore          = (s: EEGState) => s.thetaBetaRatio;
 // ✅ NUEVO: Selector para predicción de estado
 export const selectStatePrediction = (s: EEGState) => s.state_prediction;
 export const selectIsConnected     = (s: EEGState) => s.isConnected;

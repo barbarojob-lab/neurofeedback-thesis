@@ -65,6 +65,7 @@ import type {
   SessionConfig,
   SubjectiveMeasure,
   DatasetMetadata,
+  PlaybackInfo,
 } from "../types";
 
 import {
@@ -75,6 +76,7 @@ import {
   isServerError,
   isInspectionChannelSet,
   isDatasetLoaded,
+  isPlaybackPositionSet,
 } from "../types";
 
 // ---------------------------------------------------------------------------
@@ -141,6 +143,10 @@ export interface UseEEGSocketReturn {
   loadDataset: (filePath: string) => void;
   /** Último dataset cargado */
   dataset: DatasetMetadata | null;
+  /** Posición actual de reproducción cuando la fuente es dataset */
+  playback: PlaybackInfo | null;
+  /** Mueve el cursor de reproducción al segundo indicado */
+  setPlaybackPosition: (seconds: number) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +161,7 @@ export function useEEGSocket(): UseEEGSocketReturn {
   const isMountedRef         = useRef<boolean>(true);
   const reconnectAttemptState= useRef<number>(0); // para exponer al consumidor
   const [dataset, setDataset] = useState<DatasetMetadata | null>(null);
+  const [playback, setPlayback] = useState<PlaybackInfo | null>(null);
 
   // ── Acciones/estado del store con selectores atómicos ────────────────
   const pushWaveformSample = useEEGStore((s) => s.pushWaveformSample);
@@ -199,6 +206,7 @@ export function useEEGSocket(): UseEEGSocketReturn {
         }
         // 2. Métricas del epoch (un setState agrupa todo)
         updateMetrics(msg);
+        setPlayback(msg.playback ?? null);
         return;
       }
 
@@ -213,6 +221,7 @@ export function useEEGSocket(): UseEEGSocketReturn {
           setSessionActive(true, msg.session.id);
         }
         setDataset(msg.dataset ?? null);
+        setPlayback(msg.playback ?? null);
         return;
       }
 
@@ -225,6 +234,7 @@ export function useEEGSocket(): UseEEGSocketReturn {
       if (isSessionStopped(msg)) {
         setSessionActive(false);
         resetSession();
+        setPlayback(null);
         console.log("[useEEGSocket] Sesión detenida.");
         return;
       }
@@ -241,6 +251,15 @@ export function useEEGSocket(): UseEEGSocketReturn {
 
       if (isDatasetLoaded(msg)) {
         setDataset(msg.dataset);
+        setPlayback(msg.playback ?? null);
+        return;
+      }
+
+      if (isPlaybackPositionSet(msg)) {
+        setPlayback({
+          positionSec: msg.positionSec,
+          durationSec: msg.durationSec,
+        });
         return;
       }
 
@@ -424,6 +443,13 @@ export function useEEGSocket(): UseEEGSocketReturn {
     [sendMessage]
   );
 
+  const setPlaybackPosition = useCallback(
+    (seconds: number) => {
+      sendMessage({ type: "set_playback_position", payload: { seconds } });
+    },
+    [sendMessage]
+  );
+
   // ── Valor de retorno ──────────────────────────────────────────────────
   return {
     isConnected,
@@ -437,5 +463,7 @@ export function useEEGSocket(): UseEEGSocketReturn {
     setInspectionChannel,
     loadDataset,
     dataset,
+    playback,
+    setPlaybackPosition,
   };
 }

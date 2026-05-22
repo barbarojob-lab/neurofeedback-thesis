@@ -1,0 +1,4 @@
+model,n_train,n_val,val_accuracy,val_f1_macro,acc_ci95_low,acc_ci95_high,high_confidence_pct,cv_mean,cv_std,val_subjects
+high,63759,4752,0.9985,0.9955,0.9970,0.9993,95.27,0.9969,0.0013,subject_11
+low,63280,4579,0.9889,0.9461,0.9854,0.9915,96.24,NA,NA,subject_19
+unified,127039,9331,0.9937,0.9675,0.9919,0.9951,NA,NA,NA,"high_subject_11,low_subject_19"

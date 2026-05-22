@@ -1,0 +1,72 @@
+{
+  "group": "low",
+  "random_state": 42,
+  "val_subject_ratio": 0.3333333333333333,
+  "class_weight": {
+    "0": 2.0,
+    "1": 1.0,
+    "2": 1.0
+  },
+  "train_subjects": [
+    "subject_17",
+    "subject_18",
+    "subject_20",
+    "subject_21",
+    "subject_22",
+    "subject_23",
+    "subject_24",
+    "subject_25",
+    "subject_26",
+    "subject_27",
+    "subject_28",
+    "subject_29",
+    "subject_30",
+    "subject_31"
+  ],
+  "val_subjects": [
+    "subject_19"
+  ],
+  "n_train_samples": 63280,
+  "n_val_samples": 4579,
+  "class_counts_train": {
+    "awake": 4452,
+    "induction": 46893,
+    "trance": 11935
+  },
+  "class_counts_val": {
+    "awake": 150,
+    "induction": 3767,
+    "trance": 662
+  },
+  "metrics": {
+    "val_accuracy": 0.9888621969862416,
+    "val_f1_macro": 0.9461117572024392,
+    "cv_groupkfold_mean_accuracy": null,
+    "cv_groupkfold_std_accuracy": null,
+    "high_confidence_pct": 96.24372133653635
+  },
+  "confusion_matrix": {
+    "labels": [
+      "awake",
+      "induction",
+      "trance"
+    ],
+    "matrix": [
+      [
+        112,
+        38,
+        0
+      ],
+      [
+        0,
+        3766,
+        1
+      ],
+      [
+        0,
+        12,
+        650
+      ]
+    ]
+  }
+}

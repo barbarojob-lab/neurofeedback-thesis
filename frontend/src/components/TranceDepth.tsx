@@ -25,7 +25,7 @@
  */
 
 import { memo, useMemo } from "react";
-import { useEEGStore, selectZScore } from "../store/eegStore";
+import { useEEGStore, selectThetaBetaRatio } from "../store/eegStore";
 
 // ---------------------------------------------------------------------------
 // Constantes
@@ -90,7 +90,7 @@ function zToColor(z: number): string {
 // ---------------------------------------------------------------------------
 
 const TranceDepth = memo(function TranceDepth() {
-  const z = useEEGStore(selectZScore);
+  const z = useEEGStore(selectThetaBetaRatio);
 
   const barColor  = useMemo(() => zToColor(z), [z]);
   const yZero     = zToY(0);                    // posición Y de z=0 (centro)

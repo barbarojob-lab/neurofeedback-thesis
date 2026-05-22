@@ -6,13 +6,13 @@
  * Responsabilidades:
  *   1. Servidor HTTP (health-check) + WebSocket server en puerto 8080.
  *   2. Gestión del ciclo de vida de sesión (start / stop / reset).
- *   3. Ejecución del pipeline DSP por cada sample del simulador EEG.
+ *   3. Ejecución del pipeline DSP por cada sample EEG real cargado desde dataset.
  *   4. Distribución del FeedbackPayload a todos los clientes WS conectados.
  *   5. Medición continua de latencia del pipeline (objetivo: < 5 ms).
  *
  * ── Arquitectura del pipeline (por sample) ───────────────────────────────
  *
- *   EEGSimulator (250 sps)
+ *   DatasetReplayer (250 sps)
  *       │
  *       ▼  sample crudo [µV]
  *   NotchFilter            → elimina 50 Hz (interferencia red eléctrica)
@@ -59,7 +59,7 @@
  *   ENTRANTE (frontend → server):
  *     { type: 'start_session',    payload: SessionConfig      }
  *     { type: 'stop_session'                                  }
- *     { type: 'set_trance_mode',  payload: { enabled: boolean }}
+ *     { type: 'load_dataset',      payload: { path: string }   }
  *     { type: 'set_inspection_channel', payload: { channel: EEGChannel }}
  *     { type: 'ping'                                          }
  *     { type: 'submit_subjective', payload: SubjectiveMeasure }
@@ -113,14 +113,6 @@ const ML_CHANNELS = [
 type EEGChannel = typeof EEG_CHANNELS[number];
 type ChannelSample = Record<EEGChannel, number>;
 
-/**
- * Modo de adquisición de EEG:
- *   "simulator" — EEGSimulator (desarrollo y testing)
- *   "hardware"  — Esperar conexión de dispositivo real (OpenBCI, Muse, etc.)
- * Default: "hardware" para evitar simulación accidental en validación real
- */
-const EEG_MODE = (process.env.EEG_MODE ?? "hardware") as "simulator" | "hardware";
-
 /** Intervalo del log de latencia (ms) */
 const LATENCY_LOG_INTERVAL_MS = 5_000;
 
@@ -128,6 +120,9 @@ const LATENCY_LOG_INTERVAL_MS = 5_000;
 const ZSCORE_WARMUP_SAMPLES = 30;
 const DEFAULT_FRONTAL_SPECIFICITY_THRESHOLD = 1.5;
 const ARTIFACT_THRESHOLD_UV = 100;
+const PREDICTION_SMOOTHING_WINDOWS = Number(process.env.PREDICTION_SMOOTHING_WINDOWS ?? 5);
+const PREDICTION_SMOOTHING_MIN_HISTORY = 3;
+const PREDICTION_SMOOTHING_MIN_MAJORITY = 0.6;
 
 // ---------------------------------------------------------------------------
 // Tipos del protocolo WS
@@ -161,15 +156,21 @@ interface FeedbackPayload {
   // ✅ NUEVO: Predicción del estado (reemplaza command)
   state_prediction: ClassifierPrediction | null;
   connectivity    : MLServiceResult | null;  // Resultados de conectividad del ML service
+  playback        : { positionSec: number; durationSec: number } | null;
+  pipelineStageMs?: {
+    referenceAndFilterMs: number;
+    spectralAndFeatureMs: number;
+    totalMs: number;
+  };
   pipelineMs      : number;        // tiempo de procesamiento del epoch [ms]
 }
 
 type IncomingMessage =
   | { type: "start_session";    payload: SessionConfig                }
   | { type: "stop_session"                                            }
-  | { type: "set_trance_mode";  payload: { enabled: boolean }        }
   | { type: "set_inspection_channel"; payload: { channel: EEGChannel } }
   | { type: "load_dataset"; payload: { path: string }                 }
+  | { type: "set_playback_position"; payload: { seconds: number }     }
   | { type: "ping"                                                    }
   | { type: "submit_subjective"; payload: SubjectiveMeasure          };
 
@@ -180,121 +181,7 @@ type IncomingMessage =
 interface SessionState {
   id         : string;
   startedAt  : number;
-  tranceMode : boolean;
   config     : SessionConfig;
-}
-
-// ---------------------------------------------------------------------------
-// Simulador EEG (stub — reemplazar con el driver real del hardware)
-// ---------------------------------------------------------------------------
-// En producción este módulo se importaría desde ./hardware/eeg-simulator.
-// Aquí se implementa como un generador de señal sintética para que el
-// servidor sea autocontenido y testeable sin hardware.
-
-class EEGSimulator {
-  private intervalId: ReturnType<typeof setInterval> | null = null;
-  private tranceMode = false;
-  private t = 0; // tiempo en muestras
-  private blinkCountdown = 0;
-
-  start(onSample: (sample: ChannelSample) => void): void {
-    if (this.intervalId) return;
-    const intervalMs = 1000 / SAMPLE_RATE; // 4 ms entre samples a 250 Hz
-
-    this.intervalId = setInterval(() => {
-      const sample = this._generateSampleFrame();
-      onSample(sample);
-      this.t++;
-    }, intervalMs);
-  }
-
-  stop(): void {
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
-    }
-  }
-
-  setTranceMode(enabled: boolean): void {
-    this.tranceMode = enabled;
-  }
-
-  reset(): void {
-    this.t = 0;
-    this.blinkCountdown = 0;
-  }
-
-  private _generateSampleFrame(): ChannelSample {
-    const frame = {} as ChannelSample;
-    for (const channel of EEG_CHANNELS) {
-      frame[channel] = this._generateChannelSample(channel);
-    }
-    return frame;
-  }
-
-  private _generateChannelSample(channel: EEGChannel): number {
-    const fs = SAMPLE_RATE;
-    const t  = this.t / fs;
-
-    const thetaBase = this.tranceMode ? 15 : 3;
-    const betaBase = this.tranceMode ? 3 : 5;
-    const alphaBase = this.tranceMode ? 5 : 4;
-
-    const thetaGainByChannel: Record<EEGChannel, number> = {
-      Fz: 1.0,
-      Fp1: 0.55,
-      Fp2: 0.55,
-      F3: 0.62,
-      F4: 0.62,
-      C3: 0.48,
-      Cz: 0.5,
-      C4: 0.48,
-      P3: 0.35,
-      Pz: 0.32,
-      P4: 0.35,
-      O1: 0.25,
-      O2: 0.25,
-    };
-    const betaGainByChannel: Record<EEGChannel, number> = {
-      Fz: 1.0,
-      Fp1: 0.85,
-      Fp2: 0.85,
-      F3: 0.9,
-      F4: 0.9,
-      C3: 0.8,
-      Cz: 0.82,
-      C4: 0.8,
-      P3: 0.7,
-      Pz: 0.68,
-      P4: 0.7,
-      O1: 0.58,
-      O2: 0.58,
-    };
-
-    const theta = thetaBase * thetaGainByChannel[channel] * Math.sin(2 * Math.PI * 6 * t);
-    const beta = betaBase * betaGainByChannel[channel] * Math.sin(2 * Math.PI * 20 * t);
-    const alpha = alphaBase * 0.7 * Math.sin(2 * Math.PI * 10 * t);
-    const line = 2 * Math.sin(2 * Math.PI * 50 * t);
-    let sample = theta + beta + alpha + line + this._noise(3.5);
-
-    if (channel === "Fp1" || channel === "Fp2") {
-      if (this.blinkCountdown > 0) {
-        sample += 140 * Math.sin(2 * Math.PI * 1.8 * t);
-        this.blinkCountdown -= 1;
-      } else if (Math.random() < 0.003) {
-        this.blinkCountdown = 10;
-      }
-    }
-
-    return sample;
-  }
-
-  /** Ruido blanco gaussiano aproximado (Box-Muller) */
-  private _noise(amplitude: number): number {
-    const u1 = Math.random() || 1e-10;
-    const u2 = Math.random();
-    return amplitude * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -338,27 +225,97 @@ const bandPow   = new BandPowerExtractor(SAMPLE_RATE, WINDOW_SIZE);
 
 // ✅ NUEVO: Cliente ML para clasificación de estados
 const mlClient = new MLServiceClient("ws://localhost:8001/ws");
+let lastMLResult: MLServiceResult | null = null;
+let mlRequestInFlight = false;
+const predictionLabelHistory: Array<ClassifierPrediction["predicted_label"]> = [];
 
 // ---------------------------------------------------------------------------
 // Instancias de infraestructura
 // ---------------------------------------------------------------------------
 
-const simulator = new EEGSimulator();
 const datasetReplayer = new DatasetReplayer<EEGChannel>(SAMPLE_RATE, EEG_CHANNELS);
 const db        = new SessionDB();
 
-type AcquisitionSource = "none" | "simulator" | "dataset";
+type AcquisitionSource = "none" | "dataset";
 let activeSource: AcquisitionSource = "none";
 
 function stopAcquisition(): void {
-  simulator.stop();
   datasetReplayer.stop();
   activeSource = "none";
+  mlRequestInFlight = false;
+  lastMLResult = null;
+  predictionLabelHistory.length = 0;
+}
+
+function smoothPrediction(
+  prediction: ClassifierPrediction,
+): ClassifierPrediction {
+  const windowSize = Math.max(1, PREDICTION_SMOOTHING_WINDOWS);
+  predictionLabelHistory.push(prediction.predicted_label);
+  if (predictionLabelHistory.length > windowSize) {
+    predictionLabelHistory.shift();
+  }
+
+  // No suavizar hasta tener historial minimo: evita pegarse al primer estado.
+  if (predictionLabelHistory.length < PREDICTION_SMOOTHING_MIN_HISTORY) {
+    return prediction;
+  }
+
+  const counts = new Map<ClassifierPrediction["predicted_label"], number>();
+  for (const label of predictionLabelHistory) {
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+
+  let winner = prediction.predicted_label;
+  let winnerCount = counts.get(winner) ?? 0;
+  for (const [label, count] of counts.entries()) {
+    if (count > winnerCount) {
+      winner = label;
+      winnerCount = count;
+    }
+  }
+
+  const winnerRatio = winnerCount / predictionLabelHistory.length;
+  if (winnerRatio < PREDICTION_SMOOTHING_MIN_MAJORITY) {
+    return prediction;
+  }
+
+  if (winner === prediction.predicted_label) {
+    return prediction;
+  }
+
+  const classToLabel: Record<number, ClassifierPrediction["predicted_label"]> = {
+    0: "awake",
+    1: "induction",
+    2: "trance",
+  };
+  const labelToClass: Record<string, number> = {
+    awake: 0,
+    induction: 1,
+    trance: 2,
+    uncertain: -1,
+  };
+
+  const smoothed = {
+    ...prediction,
+    predicted_label: winner,
+    predicted_class: labelToClass[winner] ?? prediction.predicted_class,
+    method: "ml_fused" as const,
+  };
+
+  if (smoothed.predicted_class >= 0) {
+    smoothed.class_probabilities = {
+      awake: winner === classToLabel[0] ? 1 : 0,
+      induction: winner === classToLabel[1] ? 1 : 0,
+      trance: winner === classToLabel[2] ? 1 : 0,
+    };
+  }
+  return smoothed;
 }
 
 /**
  * Log de configuración al iniciar.
- * Indica claramente si se usa simulador (desarrollo) o hardware real (producción).
+ * Adquisición estricta desde dataset real (EDF/CSV), sin simulación.
  */
 function logStartupConfig(): void {
   console.log("╔════════════════════════════════════════════════════════╗");
@@ -368,10 +325,7 @@ function logStartupConfig(): void {
   console.log(`  Sample Rate:      ${SAMPLE_RATE} Hz`);
   console.log(`  Ventana FFT:      ${WINDOW_SIZE} samples (${(WINDOW_SIZE / SAMPLE_RATE * 1000).toFixed(0)} ms)`);
   console.log(`  Hop Size:         ${HOP_SIZE} samples (~${(HOP_SIZE / SAMPLE_RATE * 1000).toFixed(0)} ms entre epochs)`);
-  console.log(`  Modo EEG:         ${EEG_MODE === "simulator" ? "🔷 SIMULADOR (desarrollo)" : "🔴 HARDWARE REAL (producción)"}`);
-  if (EEG_MODE === "simulator") {
-    console.log(`                    $ EEG_MODE=hardware node dist/server.js  ← para hardware real`);
-  }
+  console.log("  Modo EEG:         🔴 DATASET REAL (sin simulación)");
   console.log(`  Base de datos:    SessionDB (TODO: persistencia)`);
   console.log("");
 }
@@ -398,7 +352,6 @@ function resetPipeline(config: SessionConfig): void {
     state.hopBuffer.length = 0;
     state.lastFiltered = 0;
   }
-  simulator.reset();
   datasetReplayer.reset();
   console.log("[Pipeline] Reset completado para nueva sesión");
 }
@@ -473,10 +426,19 @@ function clamp01(v: number): number {
 async function processSample(rawByChannel: ChannelSample, wss: WebSocketServer): Promise<void> {
   try {
     // ── Etapa 1: Filtrado por canal ───────────────────────────────────
+    const totalT0 = Date.now();
+    const referenceAndFilterT0 = Date.now();
+    const averageReference = ML_CHANNELS.reduce(
+      (sum, channel) => sum + rawByChannel[channel],
+      0
+    ) / ML_CHANNELS.length;
+
     let epochReady = false;
     for (const channel of EEG_CHANNELS) {
       const state = channelPipelines[channel];
-      const afterNotch = state.notch.process(rawByChannel[channel]);
+      const referencedSample = rawByChannel[channel] - averageReference;
+
+      const afterNotch = state.notch.process(referencedSample);
       const afterBandpass = state.bandpass.process(afterNotch);
       state.lastFiltered = afterBandpass;
       state.hopBuffer.push(afterBandpass);
@@ -487,25 +449,26 @@ async function processSample(rawByChannel: ChannelSample, wss: WebSocketServer):
 
     lastFilteredSample = channelPipelines.Fz.lastFiltered;
     if (!epochReady) return;
+    const referenceAndFilterMs = Date.now() - referenceAndFilterT0;
 
     // ── Etapa 2: Análisis espectral (solo cuando hay epoch completo) ──
-    const t0 = Date.now();
+    const spectralAndFeatureT0 = Date.now();
 
     const bandsByChannel: Record<EEGChannel, BandPowers> = {} as Record<EEGChannel, BandPowers>;
     const magnitudesByChannel: Record<EEGChannel, Float32Array> = {} as Record<EEGChannel, Float32Array>;
-    const windowsByChannel: Partial<Record<EEGChannel, Float32Array>> = {};
+    const filteredWindowsByChannel: Partial<Record<EEGChannel, Float32Array>> = {};
 
     for (const channel of EEG_CHANNELS) {
       const state = channelPipelines[channel];
-      const rawWindow  = state.window.getWindow();
-      const hannWindow = state.window.applyHannWindow(rawWindow);
+      const filteredWindow = state.window.getWindow();
+      const hannWindow = state.window.applyHannWindow(filteredWindow);
       const magnitudes = fftAn.analyze(hannWindow);
       magnitudesByChannel[channel] = magnitudes;
       bandsByChannel[channel] = bandPow.extract(magnitudes);
-      windowsByChannel[channel] = rawWindow;
+      filteredWindowsByChannel[channel] = filteredWindow;
     }
 
-    const mlWindow = ML_CHANNELS.map((channel) => Array.from(windowsByChannel[channel]!));
+    const mlWindow = ML_CHANNELS.map((channel) => Array.from(filteredWindowsByChannel[channel]!));
     const mlBandPowers = Object.fromEntries(
       ML_CHANNELS.map((channel) => [channel, bandsByChannel[channel]])
     ) as unknown as Record<string, Record<string, number>>;
@@ -529,16 +492,42 @@ async function processSample(rawByChannel: ChannelSample, wss: WebSocketServer):
       EEG_CHANNELS.map((channel) => [channel, clamp01(bandsByChannel[channel].theta / thetaMax)])
     ) as Record<EEGChannel, number>;
 
-    // ── Etapa 3: Clasificación via ML Service ────────────────────────
-    // ✅ NUEVO: Llamar al clasificador (retorna null si el servicio no está disponible)
-    const mlResult = await mlClient.processWindow({
-      eeg_window: mlWindow,
-      band_powers_per_channel: mlBandPowers,
-      frontal_specificity: frontalSpecificity,
-      suggestibility: currentSession?.config?.suggestibility === "low" ? "low" : "high",
-    });
+    // ── Etapa 3: Clasificación via ML Service (no bloqueante) ────────
+    // Evita bloquear el loop DSP cuando el servicio ML responde lento.
+    if (!mlRequestInFlight) {
+      mlRequestInFlight = true;
+      void mlClient.processWindow({
+        eeg_window: mlWindow,
+        band_powers_per_channel: mlBandPowers,
+        frontal_specificity: frontalSpecificity,
+        model_profile_mode: currentSession?.config?.modelProfileMode ?? "auto",
+      })
+        .then((result) => {
+          if (result) {
+            lastMLResult = result;
+            const timings = result.stage_timings_ms;
+            if (timings) {
+              console.log(
+                `[ML timings] preprocess=${timings.preprocess_ms.toFixed(2)}ms ` +
+                `coherence=${timings.coherence_ms.toFixed(2)}ms ` +
+                `plv=${timings.plv_ms.toFixed(2)}ms ` +
+                `features=${timings.feature_ms.toFixed(2)}ms ` +
+                `model=${timings.model_ms.toFixed(2)}ms ` +
+                `total=${result.processing_ms.toFixed(2)}ms`
+              );
+            }
+          }
+        })
+        .catch((err) => {
+          console.warn(`[ML-Client] processWindow falló: ${(err as Error).message}`);
+        })
+        .finally(() => {
+          mlRequestInFlight = false;
+        });
+    }
 
-    const pipelineMs = Date.now() - t0;
+    const spectralAndFeatureMs = Date.now() - spectralAndFeatureT0;
+    const pipelineMs = Date.now() - totalT0;
     recordLatency(pipelineMs);
 
     // ── Etapa 4: Broadcast al frontend ───────────────────────────────
@@ -570,9 +559,17 @@ async function processSample(rawByChannel: ChannelSample, wss: WebSocketServer):
       },
       bandPowers      : fzBands,
       thetaBeta,
-      // ✅ NUEVO: Predicción de estado del clasificador
-      state_prediction: mlResult?.classifier_prediction ?? null,
-      connectivity    : mlResult ?? null,
+      // Predicción suavizada temporalmente por mayoría deslizante.
+      state_prediction: lastMLResult?.classifier_prediction
+        ? smoothPrediction(lastMLResult.classifier_prediction)
+        : null,
+      connectivity    : lastMLResult,
+      playback        : activeSource === "dataset" ? datasetReplayer.getPlaybackInfo() : null,
+      pipelineStageMs : {
+        referenceAndFilterMs,
+        spectralAndFeatureMs,
+        totalMs: pipelineMs,
+      },
       pipelineMs,
     };
 
@@ -639,32 +636,22 @@ function handleMessage(ws: WebSocket, wss: WebSocketServer, raw: string): void {
       currentSession = {
         id        : sessionId,
         startedAt : Date.now(),
-        tranceMode: false,
         config,
       };
 
       resetPipeline(config);
 
-      // En modo hardware, solo aceptar fuente real (dataset cargado o driver real futuro).
-      if (EEG_MODE === "hardware") {
-        if (!loadedDataset || !datasetReplayer.isLoaded()) {
-          currentSession = null;
-          send(ws, {
-            type: "error",
-            message:
-              "EEG_MODE=hardware activo: falta dataset real cargado. " +
-              "Usa CARGAR DATASET y luego inicia sesión.",
-          });
-          return;
-        }
-
-        datasetReplayer.start((sample) => processSample(sample, wss));
-        activeSource = "dataset";
-      } else {
-        // Solo permitido en modo de desarrollo explícito.
-        simulator.start((sample) => processSample(sample, wss));
-        activeSource = "simulator";
+      if (!loadedDataset || !datasetReplayer.isLoaded()) {
+        currentSession = null;
+        send(ws, {
+          type: "error",
+          message: "Falta dataset real cargado. Usa CARGAR DATASET y luego inicia sesión.",
+        });
+        return;
       }
+
+      datasetReplayer.start((sample) => processSample(sample, wss));
+      activeSource = "dataset";
 
       send(ws, { type: "session_started", sessionId });
       console.log(`[Session] ▶  Sesión iniciada: ${sessionId} (${activeSource})`);
@@ -691,24 +678,6 @@ function handleMessage(ws: WebSocket, wss: WebSocketServer, raw: string): void {
       break;
     }
 
-    // ── set_trance_mode ──────────────────────────────────────────────────
-    case "set_trance_mode": {
-      const { enabled } = (msg as { type: "set_trance_mode"; payload: { enabled: boolean }}).payload;
-
-      if (!currentSession) {
-        send(ws, { type: "error", message: "No hay sesión activa para set_trance_mode" });
-        return;
-      }
-
-      currentSession.tranceMode = enabled;
-      if (activeSource === "simulator") {
-        simulator.setTranceMode(enabled);
-      }
-      send(ws, { type: "trance_mode_set", enabled });
-      console.log(`[Session] Trance mode: ${enabled ? "ON 🌀" : "OFF"}`);
-      break;
-    }
-
     // ── set_inspection_channel ──────────────────────────────────────────
     case "set_inspection_channel": {
       const { channel } = (msg as { type: "set_inspection_channel"; payload: { channel: EEGChannel } }).payload;
@@ -732,11 +701,27 @@ function handleMessage(ws: WebSocket, wss: WebSocketServer, raw: string): void {
         return;
       }
 
+      // Cargar un nuevo dataset debe dejar la sesión anterior completamente limpia.
+      // Si queda el cursor viejo o un intervalo activo, la UI parece congelarse.
+      if (currentSession) {
+        stopAcquisition();
+        currentSession = null;
+        broadcast(wss, { type: "session_stopped" });
+      } else {
+        stopAcquisition();
+      }
+
+      datasetReplayer.reset();
+
       parseDatasetMetadata(datasetPath)
         .then(async (meta) => {
           await datasetReplayer.load(datasetPath);
           loadedDataset = meta;
-          send(ws, { type: "dataset_loaded", dataset: meta });
+          send(ws, {
+            type: "dataset_loaded",
+            dataset: meta,
+            playback: datasetReplayer.getPlaybackInfo(),
+          });
           console.log(
             `[Dataset] loaded ${meta.format.toUpperCase()} ` +
             `${meta.channels.length}ch ${meta.sampleRate}Hz ${meta.durationSec.toFixed(1)}s`
@@ -745,6 +730,23 @@ function handleMessage(ws: WebSocket, wss: WebSocketServer, raw: string): void {
         .catch((err: Error) => {
           send(ws, { type: "error", message: `load_dataset: ${err.message}` });
         });
+      break;
+    }
+
+    // ── set_playback_position ──────────────────────────────────────────
+    case "set_playback_position": {
+      const seconds = (msg as { type: "set_playback_position"; payload: { seconds: number } }).payload?.seconds;
+      if (!datasetReplayer.isLoaded()) {
+        send(ws, { type: "error", message: "set_playback_position: no hay dataset cargado" });
+        return;
+      }
+
+      try {
+        const playback = datasetReplayer.seekToSeconds(Number(seconds));
+        send(ws, { type: "playback_position_set", ...playback });
+      } catch (err) {
+        send(ws, { type: "error", message: `set_playback_position: ${(err as Error).message}` });
+      }
       break;
     }
 
@@ -845,7 +847,7 @@ function createHttpServer(): http.Server {
         status    : "ok",
         uptime    : process.uptime(),
         session   : currentSession
-          ? { id: currentSession.id, tranceMode: currentSession.tranceMode }
+          ? { id: currentSession.id }
           : null,
         timestamp : new Date().toISOString(),
       };
@@ -893,8 +895,9 @@ function main(): void {
       windowSize: WINDOW_SIZE,
       hopSize   : HOP_SIZE,
       dataset   : loadedDataset,
+      playback  : datasetReplayer.getPlaybackInfo(),
       session   : currentSession
-        ? { id: currentSession.id, tranceMode: currentSession.tranceMode }
+        ? { id: currentSession.id }
         : null,
     });
 

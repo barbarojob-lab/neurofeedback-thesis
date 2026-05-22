@@ -51,7 +51,7 @@ export interface ConnectivityFeatures {
 
 export interface ClassifierPrediction {
   predicted_class:   number;          // 0=awake, 1=induction, 2=trance
-  predicted_label:   "awake" | "induction" | "trance";
+  predicted_label:   "awake" | "induction" | "trance" | "uncertain";
   confidence:        number;          // [0, 1]
   class_probabilities: {
     awake:     number;
@@ -59,7 +59,7 @@ export interface ClassifierPrediction {
     trance:    number;
   };
   is_confident: boolean;              // confidence >= 0.50
-  method:       "ml_ensemble" | "heuristic_fallback";
+  method:       "ml_ensemble" | "ml_fused" | "heuristic_fallback";
 }
 
 export interface MLServiceResult {
@@ -69,6 +69,13 @@ export interface MLServiceResult {
   connectivity_features: ConnectivityFeatures;
   classifier_prediction: ClassifierPrediction;
   feature_vector:        number[];    // 15 features (debug/logging)
+  stage_timings_ms?: {
+    preprocess_ms: number;
+    coherence_ms: number;
+    plv_ms: number;
+    feature_ms: number;
+    model_ms: number;
+  };
   processing_ms:         number;
 }
 
@@ -76,7 +83,7 @@ export interface ProcessWindowPayload {
   eeg_window:              number[][];                  // [11][500]
   band_powers_per_channel: Record<string, Record<string, number>>;
   frontal_specificity:     number;
-  suggestibility?:         "high" | "low";
+  model_profile_mode?:     "auto" | "high" | "low";
 }
 
 // ── Constantes ───────────────────────────────────────────────────────────────

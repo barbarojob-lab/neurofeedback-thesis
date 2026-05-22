@@ -136,6 +136,34 @@ export class DatasetReplayer<TChannel extends string> {
     this.cursor = 0;
   }
 
+  seekToSeconds(seconds: number): { positionSec: number; durationSec: number } {
+    if (!this.loaded) {
+      throw new Error("No hay dataset cargado");
+    }
+
+    const total = this.loaded.sampleCount;
+    if (total <= 0) {
+      this.cursor = 0;
+      return { positionSec: 0, durationSec: 0 };
+    }
+
+    const targetSample = Math.round(Math.max(0, Number(seconds) || 0) * this.targetSampleRate);
+    this.cursor = Math.min(Math.max(0, targetSample), Math.max(0, total - 1));
+
+    return {
+      positionSec: this.cursor / this.targetSampleRate,
+      durationSec: total / this.targetSampleRate,
+    };
+  }
+
+  getPlaybackInfo(): { positionSec: number; durationSec: number } | null {
+    if (!this.loaded) return null;
+    return {
+      positionSec: this.cursor / this.targetSampleRate,
+      durationSec: this.loaded.sampleCount / this.targetSampleRate,
+    };
+  }
+
   stop(): void {
     if (this.intervalId) {
       clearInterval(this.intervalId);
